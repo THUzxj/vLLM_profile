@@ -11,7 +11,7 @@ export VLLM_DISABLE_LOG_STATS=False
 export VLLM_LOGGING_LEVEL=DEBUG
 
 # Default parameters
-MODEL="meta-llama/Meta-Llama-3-8B"
+MODEL="Qwen/Qwen3-14B"
 OUTPUT_DIR="/home/v-xingjzhang/xingjian/blob/tp_benchmark/tp_benchmark_results_$(date +%Y%m%d_%H%M%S)"
 
 # Default TP configurations to test
