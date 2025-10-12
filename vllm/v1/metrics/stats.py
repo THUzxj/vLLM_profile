@@ -6,10 +6,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
     from vllm.v1.engine.output_processor import RequestState
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -187,6 +190,21 @@ class IterationStats:
                                  prefill_time=prefill_time,
                                  inference_time=inference_time,
                                  decode_time=decode_time)
+
+        logger.info(f"Finished Request: finished_reason: {finish_reason} e2e_latency: {e2e_latency:.2f}s num_prompt_tokens: {num_prompt_tokens} num_generation_tokens: {req_stats.num_generation_tokens} max_tokens_param: {max_tokens_param} queued_time: {queued_time:.2f}s prefill_time: {prefill_time:.2f}s inference_time: {inference_time:.2f}s decode_time: {decode_time:.2f}s")
+
+        # import os
+        # debug_dir = os.getenv("DEBUG_DIR", None)
+        # logger.info(f"debug_dir: {debug_dir}")
+        # debug_dir = "~/DeepResearch2/inference/"
+        # if debug_dir is not None:
+        #     os.makedirs(debug_dir, exist_ok=True)
+        #     debug_file = os.path.join(debug_dir, "finished_requests.log")
+        #     logger.info(f"Writing finished request stats to {debug_file}")
+        #     with open(debug_file, "a") as f:
+        #         f.write(f"{time.time()},{finish_reason},{e2e_latency},{num_prompt_tokens},{req_stats.num_generation_tokens},{max_tokens_param},{queued_time},{prefill_time},{inference_time},{decode_time}\n")
+        #     logger.info(f"Wrote finished request stats to {debug_file}")
+        
         self.finished_requests.append(finished_req)
 
 
