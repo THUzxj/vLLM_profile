@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_LOGITS_PROCESSOR_THREADS: Optional[int] = None
     VLLM_LOG_STATS_INTERVAL: float = 10.
+    VLLM_LOG_KV_CACHE_USAGE: bool = False
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
@@ -517,6 +518,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOG_STATS_INTERVAL":
     lambda: val if (val := float(os.getenv("VLLM_LOG_STATS_INTERVAL", "10.")))
         > 0. else 10.,
+
+    # If set to True, vllm will log KV cache usage for each request
+    # If not set, KV cache usage logging is disabled
+    "VLLM_LOG_KV_CACHE_USAGE":
+    lambda: os.getenv("VLLM_LOG_KV_CACHE_USAGE", "False").lower() in ("true", "1", "yes"),
 
     # Trace function calls
     # If set to 1, vllm will trace function calls

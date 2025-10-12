@@ -50,6 +50,7 @@ class Scheduler(SchedulerInterface):
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
+        log_kv_cache_usage: bool = False,
     ) -> None:
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
@@ -172,6 +173,7 @@ class Scheduler(SchedulerInterface):
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
+            log_kv_cache_usage=log_kv_cache_usage,
             dcp_world_size=self.dcp_world_size,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1

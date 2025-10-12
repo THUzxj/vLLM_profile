@@ -92,6 +92,7 @@ class KVCacheManager:
         use_eagle: bool = False,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
+        log_kv_cache_usage: bool = False,
         dcp_world_size: int = 1,
     ) -> None:
         self.max_model_len = max_model_len
@@ -99,6 +100,10 @@ class KVCacheManager:
         self.enable_caching = enable_caching
         self.use_eagle = use_eagle
         self.log_stats = log_stats
+        self.log_kv_cache_usage = log_kv_cache_usage
+
+        # log if vllm should log kv cache usage
+        logger.info(f"KV cache usage logging is {'enabled' if log_kv_cache_usage else 'disabled'}")
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
@@ -138,6 +143,115 @@ class KVCacheManager:
             The KV cache usage (between 0.0 and 1.0).
         """
         return self.block_pool.get_usage()
+
+    def _log_request_kv_cache_usage(self, request: Request, operation: str, 
+                                   num_new_blocks: int = 0) -> None:
+        """Log KV cache usage for a specific request.
+        
+        Args:
+            request: The request to log KV cache usage for.
+            operation: The operation being performed (e.g., 'allocate', 'free').
+            num_new_blocks: Number of new blocks allocated in this operation.
+        """
+        if not self.log_kv_cache_usage:
+            return
+            
+        try:
+            request_id = request.request_id
+            
+            # Get blocks information for this request
+            total_blocks_allocated = 0
+            total_cached_blocks = 0
+            
+            for manager in self.coordinator.single_type_managers:
+                if hasattr(manager, 'req_to_blocks') and request_id in manager.req_to_blocks:
+                    req_blocks = manager.req_to_blocks[request_id]
+                    total_blocks_allocated += len(req_blocks)
+                    
+                if hasattr(manager, 'num_cached_block') and request_id in manager.num_cached_block:
+                    total_cached_blocks += manager.num_cached_block[request_id]
+            
+            # Calculate memory usage estimation
+            block_size_tokens = self.block_size if self.block_size else 16
+            memory_per_block_mb = self._estimate_block_memory_mb()
+            total_memory_mb = total_blocks_allocated * memory_per_block_mb
+            
+            # Get global KV cache usage
+            global_usage = self.usage
+            free_blocks = self.block_pool.get_num_free_blocks()
+            total_pool_blocks = self.block_pool.num_gpu_blocks
+            
+            logger.info(
+                f"[KV-Cache-Usage] Request {request_id} - {operation}: "
+                f"allocated_blocks={total_blocks_allocated}, "
+                f"cached_blocks={total_cached_blocks}, "
+                f"new_blocks={num_new_blocks}, "
+                f"memory_est={total_memory_mb:.1f}MB, "
+                f"tokens={request.num_tokens}, "
+                f"block_size={block_size_tokens}, "
+                f"global_usage={global_usage:.2%}, "
+                f"free_blocks={free_blocks}/{total_pool_blocks}"
+            )
+            
+        except Exception as e:
+            logger.warning(f"Failed to log KV cache usage for request {request_id}: {e}")
+
+    def _estimate_block_memory_mb(self) -> float:
+        """Estimate memory usage per block in MB.
+        
+        Returns:
+            Estimated memory usage per block in MB.
+        """
+        try:
+            if not self.kv_cache_config.kv_cache_groups:
+                # No KV cache groups (e.g., attention-free models)
+                logger.debug("No KV cache groups found, returning 0 memory usage")
+                return 0.0
+            
+            # Calculate total memory per block across all KV cache groups
+            total_memory_per_block_bytes = 0
+            group_details = []
+            
+            for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
+                kv_cache_spec = kv_cache_group.kv_cache_spec
+                
+                # Use the actual page_size_bytes from the KV cache spec
+                # This accounts for all model parameters: block_size, num_kv_heads, 
+                # head_size, dtype, and special cases like MLA
+                page_size_bytes = kv_cache_spec.page_size_bytes
+                
+                # Number of layers in this group
+                num_layers_in_group = len(kv_cache_group.layer_names)
+                
+                # Memory for this group
+                group_memory_bytes = page_size_bytes * num_layers_in_group
+                total_memory_per_block_bytes += group_memory_bytes
+                
+                # Store details for debugging
+                group_details.append({
+                    'group_id': i,
+                    'layers': num_layers_in_group,
+                    'page_size_bytes': page_size_bytes,
+                    'group_memory_bytes': group_memory_bytes,
+                    'spec_type': type(kv_cache_spec).__name__
+                })
+            
+            # Convert bytes to MB
+            memory_per_block_mb = total_memory_per_block_bytes / (1024 * 1024)
+            
+            # Log detailed breakdown if debug logging is enabled
+            logger.debug(f"KV Cache memory estimation breakdown:")
+            for detail in group_details:
+                logger.debug(f"  Group {detail['group_id']} ({detail['spec_type']}): "
+                        f"{detail['layers']} layers × {detail['page_size_bytes']} bytes = "
+                        f"{detail['group_memory_bytes']} bytes")
+            logger.debug(f"Total per block: {total_memory_per_block_bytes} bytes = "
+                        f"{memory_per_block_mb:.2f} MB")
+            
+            return memory_per_block_mb
+        except Exception:
+            # Fallback estimation
+            return 0.5  # 0.5 MB per block as rough estimate
 
     def make_prefix_cache_stats(self) -> Optional[PrefixCacheStats]:
         """Get (and reset) the prefix cache stats.
@@ -270,6 +384,7 @@ class KVCacheManager:
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
             # Cannot allocate new blocks
+            self._log_request_kv_cache_usage(request, "allocate_failed", 0)
             return None
 
         # Touch the computed blocks to make sure they won't be evicted.
@@ -301,6 +416,10 @@ class KVCacheManager:
                                   request.num_tokens)
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
+        # Log KV cache usage for this allocation
+        total_new_blocks = sum(len(block_list) for block_list in new_blocks)
+        self._log_request_kv_cache_usage(request, "allocate", total_new_blocks)
+
         return KVCacheBlocks(new_blocks)
 
     def free(self, request: Request) -> None:
@@ -311,6 +430,9 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
+        # Log KV cache usage before freeing
+        self._log_request_kv_cache_usage(request, "free", 0)
+        
         self.coordinator.free(request.request_id)
 
     def reset_prefix_cache(self) -> bool:

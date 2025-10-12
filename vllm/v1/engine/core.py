@@ -19,6 +19,7 @@ import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
@@ -128,6 +129,7 @@ class EngineCore:
             include_finished_set=vllm_config.parallel_config.data_parallel_size
             > 1,
             log_stats=self.log_stats,
+            log_kv_cache_usage=envs.VLLM_LOG_KV_CACHE_USAGE,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
