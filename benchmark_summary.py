@@ -65,10 +65,10 @@ def print_summary(latency_results, serving_results, show_details=True):
     # Latency results summary
     if latency_results and show_details:
         print("\nOFFLINE LATENCY RESULTS:")
-        print("-" * 80)
-        print(f"{'Input':<8} {'Output':<8} {'Batch':<8} {'MaxBatch':<10} {'Avg Latency':<12} {'P50':<8} {'P99':<8}")
-        print(f"{'Len':<8} {'Len':<8} {'Size':<8} {'Tokens':<10} {'(s)':<12} {'(s)':<8} {'(s)':<8}")
-        print("-" * 80)
+        print("-" * 140)
+        print(f"{'Input':<8} {'Output':<8} {'Batch':<8} {'MaxBatch':<10} {'Total Lat':<10} {'Prefill':<10} {'Decode':<10} {'Prefill%':<10} {'P50 Total':<10} {'P99 Total':<10}")
+        print(f"{'Len':<8} {'Len':<8} {'Size':<8} {'Tokens':<10} {'(s)':<10} {'(s)':<10} {'(s)':<10} {'(%)':<10} {'(s)':<10} {'(s)':<10}")
+        print("-" * 140)
         
         # Sort by input_len, output_len, batch_size, max_batched_tokens
         sorted_latency = sorted(latency_results.items(), 
@@ -81,18 +81,63 @@ def print_summary(latency_results, serving_results, show_details=True):
             config = result['config']
             data = result['data']
             
-            if 'avg_latency' in data and 'percentiles' in data:
+            # Try new format first (with detailed timing), fallback to old format
+            if 'avg_total_latency' in data:
+                # New format with detailed timing
+                total_lat = data['avg_total_latency']
+                prefill_time = data.get('avg_prefill_time', 0)
+                decode_time = data.get('avg_decode_time', 0)
+                prefill_ratio = data.get('prefill_ratio', 0) * 100  # Convert to percentage
+                p50 = data.get('total_latency_percentiles', {}).get('50', 0)
+                p99 = data.get('total_latency_percentiles', {}).get('99', 0)
+                
+                print(f"{config['input_len']:<8} {config['output_len']:<8} "
+                      f"{config['batch_size']:<8} {config['max_batched_tokens']:<10} "
+                      f"{total_lat:<10.3f} {prefill_time:<10.3f} {decode_time:<10.3f} "
+                      f"{prefill_ratio:<10.1f} {p50:<10.3f} {p99:<10.3f}")
+            elif 'avg_latency' in data and 'percentiles' in data:
+                # Old format (backward compatibility)
                 avg_lat = data['avg_latency']
                 p50 = data['percentiles'].get(50, 0)
                 p99 = data['percentiles'].get(99, 0)
                 
                 print(f"{config['input_len']:<8} {config['output_len']:<8} "
                       f"{config['batch_size']:<8} {config['max_batched_tokens']:<10} "
-                      f"{avg_lat:<12.3f} {p50:<8.3f} {p99:<8.3f}")
+                      f"{avg_lat:<10.3f} {'N/A':<10} {'N/A':<10} {'N/A':<10} "
+                      f"{p50:<10.3f} {p99:<10.3f}")
             else:
                 print(f"{config['input_len']:<8} {config['output_len']:<8} "
                       f"{config['batch_size']:<8} {config['max_batched_tokens']:<10} "
-                      f"{'N/A':<12} {'N/A':<8} {'N/A':<8}")
+                      f"{'N/A':<10} {'N/A':<10} {'N/A':<10} {'N/A':<10} {'N/A':<10} {'N/A':<10}")
+        
+        # Additional detailed timing breakdown for configurations with detailed timing data
+        detailed_configs = [(filename, result) for filename, result in sorted_latency 
+                           if 'avg_total_latency' in result['data']]
+        
+        if detailed_configs:
+            print("\nDETAILED TIMING BREAKDOWN (Percentiles):")
+            print("-" * 120)
+            print(f"{'Config':<25} {'Total P50/P99':<15} {'Prefill P50/P99':<17} {'Decode P50/P99':<16} {'Prefill %':<10}")
+            print(f"{'(in/out/bs/mbt)':<25} {'(s)':<15} {'(s)':<17} {'(s)':<16} {'Avg':<10}")
+            print("-" * 120)
+            
+            for filename, result in detailed_configs:
+                config = result['config']
+                data = result['data']
+                
+                config_str = f"{config['input_len']}/{config['output_len']}/{config['batch_size']}/{config['max_batched_tokens']}"
+                
+                total_p50 = data.get('total_latency_percentiles', {}).get('50', 0)
+                total_p99 = data.get('total_latency_percentiles', {}).get('99', 0)
+                prefill_p50 = data.get('prefill_time_percentiles', {}).get('50', 0)
+                prefill_p99 = data.get('prefill_time_percentiles', {}).get('99', 0)
+                decode_p50 = data.get('decode_time_percentiles', {}).get('50', 0)
+                decode_p99 = data.get('decode_time_percentiles', {}).get('99', 0)
+                prefill_ratio = data.get('prefill_ratio', 0) * 100
+                
+                print(f"{config_str:<25} {total_p50:.3f}/{total_p99:.3f}   "
+                      f"{prefill_p50:.3f}/{prefill_p99:.3f}     "
+                      f"{decode_p50:.3f}/{decode_p99:.3f}      {prefill_ratio:.1f}%")
     
     # Serving results summary
     if serving_results and show_details:
@@ -133,7 +178,11 @@ def export_csv(latency_results, serving_results, output_dir):
         latency_csv_path = Path(output_dir) / "latency_results.csv"
         with open(latency_csv_path, 'w', newline='') as csvfile:
             fieldnames = ['input_len', 'output_len', 'batch_size', 'max_batched_tokens', 
-                         'avg_latency', 'p50_latency', 'p99_latency', 'throughput']
+                         'avg_total_latency', 'avg_prefill_time', 'avg_decode_time', 'prefill_ratio',
+                         'p50_total_latency', 'p99_total_latency', 'p50_prefill_time', 'p99_prefill_time',
+                         'p50_decode_time', 'p99_decode_time', 'throughput',
+                         # Backward compatibility fields
+                         'avg_latency', 'p50_latency', 'p99_latency']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
             
@@ -148,16 +197,51 @@ def export_csv(latency_results, serving_results, output_dir):
                 config = result['config']
                 data = result['data']
                 
+                # Base configuration
                 row = {
                     'input_len': config['input_len'],
                     'output_len': config['output_len'],
                     'batch_size': config['batch_size'],
                     'max_batched_tokens': config['max_batched_tokens'],
-                    'avg_latency': data.get('avg_latency', 0),
-                    'p50_latency': data.get('percentiles', {}).get(50, 0),
-                    'p99_latency': data.get('percentiles', {}).get(99, 0),
-                    'throughput': data.get('throughput', 0)
                 }
+                
+                # New detailed timing format
+                if 'avg_total_latency' in data:
+                    row.update({
+                        'avg_total_latency': data.get('avg_total_latency', 0),
+                        'avg_prefill_time': data.get('avg_prefill_time', 0),
+                        'avg_decode_time': data.get('avg_decode_time', 0),
+                        'prefill_ratio': data.get('prefill_ratio', 0),
+                        'p50_total_latency': data.get('total_latency_percentiles', {}).get('50', 0),
+                        'p99_total_latency': data.get('total_latency_percentiles', {}).get('99', 0),
+                        'p50_prefill_time': data.get('prefill_time_percentiles', {}).get('50', 0),
+                        'p99_prefill_time': data.get('prefill_time_percentiles', {}).get('99', 0),
+                        'p50_decode_time': data.get('decode_time_percentiles', {}).get('50', 0),
+                        'p99_decode_time': data.get('decode_time_percentiles', {}).get('99', 0),
+                        # Backward compatibility
+                        'avg_latency': data.get('avg_total_latency', 0),
+                        'p50_latency': data.get('total_latency_percentiles', {}).get('50', 0),
+                        'p99_latency': data.get('total_latency_percentiles', {}).get('99', 0),
+                    })
+                else:
+                    # Old format (backward compatibility)
+                    row.update({
+                        'avg_total_latency': data.get('avg_latency', 0),
+                        'avg_prefill_time': 0,
+                        'avg_decode_time': 0,
+                        'prefill_ratio': 0,
+                        'p50_total_latency': data.get('percentiles', {}).get('50', 0),
+                        'p99_total_latency': data.get('percentiles', {}).get('99', 0),
+                        'p50_prefill_time': 0,
+                        'p99_prefill_time': 0,
+                        'p50_decode_time': 0,
+                        'p99_decode_time': 0,
+                        'avg_latency': data.get('avg_latency', 0),
+                        'p50_latency': data.get('percentiles', {}).get('50', 0),
+                        'p99_latency': data.get('percentiles', {}).get('99', 0),
+                    })
+                
+                row['throughput'] = data.get('throughput', 0)
                 writer.writerow(row)
         
         print(f"Latency results exported to: {latency_csv_path}")

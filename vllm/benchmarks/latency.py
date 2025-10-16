@@ -7,9 +7,10 @@ import dataclasses
 import json
 import os
 import time
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import numpy as np
+import torch
 from tqdm import tqdm
 
 import vllm.envs as envs
@@ -110,36 +111,230 @@ def main(args: argparse.Namespace):
         "prompt_token_ids": batch
     } for batch in dummy_prompt_token_ids.tolist()]
 
+    def _generate_with_timing(prompts, sampling_params=None, beam_params=None, use_tqdm=False):
+        """
+        Generate with detailed timing information.
+        Returns: Tuple of (outputs, total_latency_ms, prefill_time_ms, decode_time_ms)
+        """
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        start_time = time.perf_counter()
+        
+        # Try multiple approaches for accessing detailed timing
+        engine = llm.llm_engine
+        
+        # Method 1: Try to use v1 engine's output processor stats  
+        try:
+            if hasattr(engine, 'output_processor'):
+                # Clear any existing stats
+                if hasattr(engine.output_processor, 'iteration_stats_collector'):
+                    collector = engine.output_processor.iteration_stats_collector
+                    # Reset the collector to capture new stats
+                    if hasattr(collector, 'finished_requests'):
+                        collector.finished_requests = []
+                    
+                    if beam_params is not None:
+                        outputs = llm.beam_search(prompts, beam_params)
+                    else:
+                        outputs = llm.generate(prompts, sampling_params=sampling_params, use_tqdm=use_tqdm)
+                    
+                    torch.cuda.synchronize() if torch.cuda.is_available() else None
+                    end_time = time.perf_counter()
+                    
+                    total_latency = (end_time - start_time) * 1000
+                    
+                    # Try to get timing from the collector
+                    if hasattr(collector, 'finished_requests') and collector.finished_requests:
+                        finished_req = collector.finished_requests[0]
+                        prefill_time_ms = finished_req.prefill_time * 1000
+                        decode_time_ms = finished_req.decode_time * 1000
+                        import sys
+                        print("✓ Using detailed timing from output processor", file=sys.stderr)
+                        return outputs, total_latency, prefill_time_ms, decode_time_ms
+        except Exception as e:
+            import sys
+            print(f"Output processor method failed: {e}", file=sys.stderr)
+        
+        # Method 2: Try to access engine_core stats_collector (original approach but improved)
+        try:
+            if hasattr(engine, 'engine_core'):
+                engine_core = engine.engine_core
+                
+                # Check for stats_collector attribute
+                if hasattr(engine_core, 'stats_collector'):
+                    stats_collector = engine_core.stats_collector
+                    
+                    # Try to reset finished requests using different possible attributes
+                    for attr_name in ['finished_requests', 'finished_requests_iter', 'iteration_stats']:
+                        if hasattr(stats_collector, attr_name):
+                            try:
+                                if isinstance(getattr(stats_collector, attr_name), list):
+                                    setattr(stats_collector, attr_name, [])
+                                elif hasattr(getattr(stats_collector, attr_name), 'clear'):
+                                    getattr(stats_collector, attr_name).clear()
+                            except:
+                                pass
+                    
+                    if beam_params is not None:
+                        outputs = llm.beam_search(prompts, beam_params)
+                    else:
+                        outputs = llm.generate(prompts, sampling_params=sampling_params, use_tqdm=use_tqdm)
+                    
+                    torch.cuda.synchronize() if torch.cuda.is_available() else None
+                    end_time = time.perf_counter()
+                    
+                    total_latency = (end_time - start_time) * 1000
+                    
+                    # Try to extract timing data from different possible attributes
+                    finished_reqs = None
+                    for attr_name in ['finished_requests', 'finished_requests_iter', 'iteration_stats']:
+                        if hasattr(stats_collector, attr_name):
+                            attr_value = getattr(stats_collector, attr_name)
+                            if isinstance(attr_value, list) and attr_value:
+                                finished_reqs = attr_value
+                                break
+                            elif hasattr(attr_value, '__iter__'):
+                                try:
+                                    finished_reqs = list(attr_value)
+                                    if finished_reqs:
+                                        break
+                                except:
+                                    pass
+                    
+                    if finished_reqs:
+                        finished_req = finished_reqs[0]
+                        # Try different attribute names for timing
+                        prefill_time_ms = 0
+                        decode_time_ms = 0
+                        
+                        for prefill_attr in ['prefill_time', 'time_prefill', 'prefill_duration']:
+                            if hasattr(finished_req, prefill_attr):
+                                prefill_time_ms = getattr(finished_req, prefill_attr) * 1000
+                                break
+                        
+                        for decode_attr in ['decode_time', 'time_decode', 'decode_duration']:
+                            if hasattr(finished_req, decode_attr):
+                                decode_time_ms = getattr(finished_req, decode_attr) * 1000
+                                break
+                        
+                        if decode_time_ms == 0:
+                            decode_time_ms = total_latency - prefill_time_ms
+                        
+                        import sys
+                        print("✓ Using detailed timing from engine core stats", file=sys.stderr)
+                        return outputs, total_latency, prefill_time_ms, decode_time_ms
+                else:
+                    import sys
+                    print(f"engine_core exists but no stats_collector found", file=sys.stderr)
+            else:
+                import sys
+                print(f"No engine_core found", file=sys.stderr)
+        except Exception as e:
+            import sys
+            print(f"Engine core stats method failed: {e}", file=sys.stderr)
+        
+        # Method 3: Try direct engine stats access
+        try:
+            if hasattr(engine, 'step'):
+                # Hook into the engine step to capture metrics
+                original_step = engine.step
+                step_metrics = {'prefill_time': None, 'decode_time': None}
+                
+                def hooked_step():
+                    step_start = time.perf_counter()
+                    result = original_step()
+                    step_end = time.perf_counter()
+                    
+                    # Record timing based on step results
+                    if step_metrics['prefill_time'] is None:
+                        step_metrics['prefill_time'] = step_end - step_start
+                    else:
+                        if step_metrics['decode_time'] is None:
+                            step_metrics['decode_time'] = 0
+                        step_metrics['decode_time'] += step_end - step_start
+                    
+                    return result
+                
+                engine.step = hooked_step
+                
+                try:
+                    if beam_params is not None:
+                        outputs = llm.beam_search(prompts, beam_params)
+                    else:
+                        outputs = llm.generate(prompts, sampling_params=sampling_params, use_tqdm=use_tqdm)
+                    
+                    torch.cuda.synchronize() if torch.cuda.is_available() else None
+                    end_time = time.perf_counter()
+                    
+                    total_latency = (end_time - start_time) * 1000
+                    
+                    if step_metrics['prefill_time'] is not None:
+                        prefill_time_ms = step_metrics['prefill_time'] * 1000
+                        decode_time_ms = step_metrics['decode_time'] * 1000 if step_metrics['decode_time'] else (total_latency - prefill_time_ms)
+                        import sys
+                        print("✓ Using detailed timing from engine step hooks", file=sys.stderr)
+                        return outputs, total_latency, prefill_time_ms, decode_time_ms
+                finally:
+                    engine.step = original_step
+        except Exception as e:
+            import sys
+            print(f"Engine step hook method failed: {e}", file=sys.stderr)
+        
+        import sys
+        print("⚠ Falling back to simple timing with estimation", file=sys.stderr)
+        
+        raise Exception("All detailed timing methods failed.")
+        # Fallback: simple timing with estimation
+        if beam_params is not None:
+            outputs = llm.beam_search(prompts, beam_params)
+        else:
+            outputs = llm.generate(prompts, sampling_params=sampling_params, use_tqdm=use_tqdm)
+        
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        end_time = time.perf_counter()
+        
+        total_latency = (end_time - start_time) * 1000
+        # Estimate prefill time as 20% of total (conservative estimate)
+        prefill_time_ms = total_latency * 0.2
+        decode_time_ms = total_latency * 0.8
+        
+        return outputs, total_latency, prefill_time_ms, decode_time_ms
+
     def llm_generate():
         if not args.use_beam_search:
-            llm.generate(dummy_prompts,
-                         sampling_params=sampling_params,
-                         use_tqdm=False)
-        else:
-            llm.beam_search(
+            return _generate_with_timing(
                 dummy_prompts,
-                BeamSearchParams(
-                    beam_width=args.n,
-                    max_tokens=args.output_len,
-                    ignore_eos=True,
-                ),
+                sampling_params=sampling_params,
+                use_tqdm=False
+            )
+        else:
+            beam_params = BeamSearchParams(
+                beam_width=args.n,
+                max_tokens=args.output_len,
+                ignore_eos=True,
+            )
+            return _generate_with_timing(
+                dummy_prompts,
+                beam_params=beam_params
             )
 
     def run_to_completion(profile_dir: Optional[str] = None):
         if profile_dir:
             llm.start_profile()
-            llm_generate()
+            outputs, total_latency_ms, prefill_time_ms, decode_time_ms = llm_generate()
             llm.stop_profile()
+            return None  # Profiling mode doesn't return timing data
         else:
-            start_time = time.perf_counter()
-            llm_generate()
-            end_time = time.perf_counter()
-            latency = end_time - start_time
-            return latency
+            outputs, total_latency_ms, prefill_time_ms, decode_time_ms = llm_generate()
+            # Convert ms to seconds for compatibility with existing code
+            latency_seconds = total_latency_ms / 1000.0
+            prefill_seconds = prefill_time_ms / 1000.0
+            decode_seconds = decode_time_ms / 1000.0
+            return latency_seconds, prefill_seconds, decode_seconds
 
     print("Warming up...")
     for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
-        run_to_completion(profile_dir=None)
+        result = run_to_completion(profile_dir=None)
+        # Warmup doesn't need to store results
 
     if args.profile:
         profile_dir = envs.VLLM_TORCH_PROFILER_DIR
@@ -149,18 +344,55 @@ def main(args: argparse.Namespace):
 
     # Benchmark.
     latencies = []
+    prefill_times = []
+    decode_times = []
     for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
-        latencies.append(run_to_completion(profile_dir=None))
+        result = run_to_completion(profile_dir=None)
+        if result is not None:  # Not in profiling mode
+            latency_sec, prefill_sec, decode_sec = result
+            latencies.append(latency_sec)
+            prefill_times.append(prefill_sec)
+            decode_times.append(decode_sec)
+    
     latencies = np.array(latencies)
+    prefill_times = np.array(prefill_times)
+    decode_times = np.array(decode_times)
     percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)
-    print(f"Avg latency: {np.mean(latencies)} seconds")
+    prefill_percentiles = np.percentile(prefill_times, percentages)
+    decode_percentiles = np.percentile(decode_times, percentages)
+    
+    print(f"Avg total latency: {np.mean(latencies):.4f} seconds")
+    print(f"Avg prefill time: {np.mean(prefill_times):.4f} seconds")
+    print(f"Avg decode time: {np.mean(decode_times):.4f} seconds")
+    print(f"Prefill/Total ratio: {np.mean(prefill_times)/np.mean(latencies):.2%}")
+    
+    print("\nLatency Percentiles:")
     for percentage, percentile in zip(percentages, percentiles):
-        print(f"{percentage}% percentile latency: {percentile} seconds")
+        print(f"{percentage}% percentile total latency: {percentile:.4f} seconds")
+    
+    print("\nPrefill Time Percentiles:")
+    for percentage, percentile in zip(percentages, prefill_percentiles):
+        print(f"{percentage}% percentile prefill time: {percentile:.4f} seconds")
+    
+    print("\nDecode Time Percentiles:")
+    for percentage, percentile in zip(percentages, decode_percentiles):
+        print(f"{percentage}% percentile decode time: {percentile:.4f} seconds")
 
     # Output JSON results if specified
     if args.output_json:
         results = {
+            "avg_total_latency": np.mean(latencies),
+            "avg_prefill_time": np.mean(prefill_times),
+            "avg_decode_time": np.mean(decode_times),
+            "prefill_ratio": np.mean(prefill_times) / np.mean(latencies),
+            "total_latencies": latencies.tolist(),
+            "prefill_times": prefill_times.tolist(),
+            "decode_times": decode_times.tolist(),
+            "total_latency_percentiles": dict(zip(percentages, percentiles.tolist())),
+            "prefill_time_percentiles": dict(zip(percentages, prefill_percentiles.tolist())),
+            "decode_time_percentiles": dict(zip(percentages, decode_percentiles.tolist())),
+            # Keep backward compatibility
             "avg_latency": np.mean(latencies),
             "latencies": latencies.tolist(),
             "percentiles": dict(zip(percentages, percentiles.tolist())),
