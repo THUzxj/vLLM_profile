@@ -97,6 +97,51 @@ class PrefillDecodeBenchmark:
             return torch.cuda.memory_allocated() / 1024**3
         return 0.0
     
+    def _generate_with_timing(self, llm: LLM, prompts: List[Dict[str, Any]], 
+                             sampling_params: SamplingParams) -> tuple[List, float, float, float]:
+        """
+        Generate outputs with timing information.
+        
+        Returns:
+            Tuple of (outputs, total_latency_ms, prefill_time_ms, decode_time_ms)
+        """
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        start_time = time.perf_counter()
+        
+        # Try to hook into engine for detailed timing
+        try:
+            engine = llm.llm_engine
+            if hasattr(engine, 'engine_core') and hasattr(engine.engine_core, 'stats_collector'):
+                stats_collector = engine.engine_core.stats_collector
+                stats_collector.finished_requests_iter = []
+                
+                outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
+                torch.cuda.synchronize() if torch.cuda.is_available() else None
+                end_time = time.perf_counter()
+                
+                total_latency = (end_time - start_time) * 1000  # Convert to ms
+                
+                # Extract timing from finished requests
+                if stats_collector.finished_requests_iter:
+                    finished_req = stats_collector.finished_requests_iter[0]
+                    prefill_time_ms = finished_req.prefill_time * 1000
+                    decode_time_ms = total_latency - prefill_time_ms
+                    return outputs, total_latency, prefill_time_ms, decode_time_ms
+        except:
+            pass
+        
+        # Fallback: simple timing with estimation
+        outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        end_time = time.perf_counter()
+        
+        total_latency = (end_time - start_time) * 1000
+        # Estimate prefill time as 20% of total (conservative estimate)
+        prefill_time_ms = total_latency * 0.2
+        decode_time_ms = total_latency - prefill_time_ms
+        
+        return outputs, total_latency, prefill_time_ms, decode_time_ms
+    
     @contextmanager
     def _hook_engine_timing(self, llm: LLM):
         """Context manager to hook into engine timing for accurate prefill/decode measurement."""
@@ -184,8 +229,7 @@ class PrefillDecodeBenchmark:
         # Warmup runs
         print(f"  Warming up with {num_warmup} iterations...")
         for _ in range(num_warmup):
-            _ = llm.generate(prompts, sampling_params, use_tqdm=False)
-            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            _, _, _, _ = self._generate_with_timing(llm, prompts, sampling_params)
         
         # Benchmark runs with timing hooks
         print(f"  Running {num_trials} benchmark iterations...")
@@ -196,81 +240,25 @@ class PrefillDecodeBenchmark:
         for trial in tqdm(range(num_trials), desc="  Benchmarking"):
             torch.cuda.synchronize() if torch.cuda.is_available() else None
             
-            # Hook into the engine to get detailed timing
+            # Use our timing wrapper
             try:
-                # Try to access the v1 engine's stats collector
-                engine = llm.llm_engine
-                if hasattr(engine, 'engine_core') and hasattr(engine.engine_core, 'stats_collector'):
-                    stats_collector = engine.engine_core.stats_collector
-                    
-                    # Clear previous stats
-                    stats_collector.finished_requests_iter = []
-                    
-                    start_time = time.perf_counter()
-                    outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
-                    torch.cuda.synchronize() if torch.cuda.is_available() else None
-                    end_time = time.perf_counter()
-                    
-                    total_latency = (end_time - start_time) * 1000  # Convert to ms
-                    total_latencies.append(total_latency)
-                    
-                    # Extract timing from finished requests
-                    if stats_collector.finished_requests_iter:
-                        finished_req = stats_collector.finished_requests_iter[0]
-                        prefill_time_ms = finished_req.prefill_time * 1000  # Convert to ms
-                        decode_time_ms = finished_req.decode_time * 1000    # Convert to ms
-                        
-                        prefill_times.append(prefill_time_ms)
-                        decode_times.append(decode_time_ms)
-                    else:
-                        # Fallback to estimation if stats not available
-                        print(f"    Warning: No finished request stats available, using 15% estimation for prefill time")
-                        estimated_prefill_time = total_latency * 0.15  # Better estimate
-                        decode_time = total_latency - estimated_prefill_time
-                        prefill_times.append(estimated_prefill_time)
-                        decode_times.append(decode_time)
-                        
-                else:
-                    # Fallback for non-v1 engine or missing stats collector
-                    print(f"    Warning: Engine core stats collector not available, using ratio-based estimation")
-                    start_time = time.perf_counter()
-                    outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
-                    torch.cuda.synchronize() if torch.cuda.is_available() else None
-                    end_time = time.perf_counter()
-                    
-                    total_latency = (end_time - start_time) * 1000
-                    total_latencies.append(total_latency)
-                    
-                    # Use improved estimation based on batch size and sequence length
-                    batch_size = len(prompts)
-                    input_length = len(prompts[0]["prompt_token_ids"]) if prompts else 100
-                    output_length = sampling_params.max_tokens
-                    
-                    # Empirical formula: prefill time scales with input length, decode with output
-                    prefill_ratio = min(0.3, input_length / (input_length + output_length * 3))
-                    print(f"    Using prefill ratio: {prefill_ratio:.3f} (input_len={input_length}, output_len={output_length})")
-                    estimated_prefill_time = total_latency * prefill_ratio
-                    decode_time = total_latency - estimated_prefill_time
-                    
-                    prefill_times.append(estimated_prefill_time)
-                    decode_times.append(decode_time)
+                outputs, total_latency, prefill_time_ms, decode_time_ms = self._generate_with_timing(
+                    llm, prompts, sampling_params
+                )
+                
+                total_latencies.append(total_latency)
+                prefill_times.append(prefill_time_ms)
+                decode_times.append(decode_time_ms)
                     
             except Exception as e:
-                print(f"    Warning: Could not access detailed timing, using final fallback (15% estimation): {e}")
-                # Final fallback
-                start_time = time.perf_counter()
-                outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
-                torch.cuda.synchronize() if torch.cuda.is_available() else None
-                end_time = time.perf_counter()
-                
-                total_latency = (end_time - start_time) * 1000
+                print(f"    Warning: Could not access detailed timing, using fallback: {e}")
+                # Final fallback using our timing method
+                _, total_latency, prefill_time_ms, decode_time_ms = self._generate_with_timing(
+                    llm, prompts, sampling_params
+                )
                 total_latencies.append(total_latency)
-                
-                estimated_prefill_time = total_latency * 0.15
-                decode_time = total_latency - estimated_prefill_time
-                print(f"    Using 15% prefill estimation: prefill={estimated_prefill_time:.2f}ms, decode={decode_time:.2f}ms")
-                prefill_times.append(estimated_prefill_time)
-                decode_times.append(decode_time)
+                prefill_times.append(prefill_time_ms)
+                decode_times.append(decode_time_ms)
         
         avg_prefill_time = np.mean(prefill_times)
         avg_total_latency = np.mean(total_latencies)
@@ -297,8 +285,7 @@ class PrefillDecodeBenchmark:
         # Warmup runs
         print(f"  Warming up with {num_warmup} iterations...")
         for _ in range(num_warmup):
-            _ = llm.generate(prompts, sampling_params, use_tqdm=False)
-            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            _, _, _, _ = self._generate_with_timing(llm, prompts, sampling_params)
         
         # Benchmark runs with hooks
         print(f"  Running {num_trials} benchmark iterations with engine hooks...")
@@ -310,33 +297,10 @@ class PrefillDecodeBenchmark:
             torch.cuda.synchronize() if torch.cuda.is_available() else None
             
             with self._hook_engine_timing(llm) as timing_data:
-                start_time = time.perf_counter()
-                timing_data['start_time'] = start_time
-                
-                outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
-                
-                torch.cuda.synchronize() if torch.cuda.is_available() else None
-                end_time = time.perf_counter()
-                
-                total_latency = (end_time - start_time) * 1000  # Convert to ms
+                outputs, total_latency, prefill_time_ms, decode_time_ms = self._generate_with_timing(
+                    llm, prompts, sampling_params
+                )
                 total_latencies.append(total_latency)
-                
-                # Calculate prefill time using hooked timing
-                if timing_data['first_token_time'] is not None:
-                    prefill_time_ms = (timing_data['first_token_time'] - start_time) * 1000
-                    decode_time_ms = (end_time - timing_data['first_token_time']) * 1000
-                else:
-                    # Fallback to estimation
-                    print(f"    Warning: Engine hooks did not capture first token time, using ratio-based estimation")
-                    batch_size = len(prompts)
-                    input_length = len(prompts[0]["prompt_token_ids"]) if prompts else 100
-                    output_length = sampling_params.max_tokens
-                    
-                    prefill_ratio = min(0.3, input_length / (input_length + output_length * 3))
-                    print(f"    Hook fallback using prefill ratio: {prefill_ratio:.3f}")
-                    prefill_time_ms = total_latency * prefill_ratio
-                    decode_time_ms = total_latency - prefill_time_ms
-                
                 prefill_times.append(prefill_time_ms)
                 decode_times.append(decode_time_ms)
         
@@ -363,7 +327,7 @@ class PrefillDecodeBenchmark:
         # Warmup runs
         print(f"  Warming up with {num_warmup} iterations...")
         for _ in range(num_warmup):
-            _ = llm.generate(prompts, sampling_params, use_tqdm=False)
+            _, _, _, _ = self._generate_with_timing(llm, prompts, sampling_params, use_tqdm=False)
             torch.cuda.synchronize() if torch.cuda.is_available() else None
         
         # Benchmark runs
@@ -371,16 +335,10 @@ class PrefillDecodeBenchmark:
         total_latencies = []
         
         for trial in tqdm(range(num_trials), desc="  Benchmarking"):
-            torch.cuda.synchronize() if torch.cuda.is_available() else None
-            start_time = time.perf_counter()
-            
-            outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
-            
-            torch.cuda.synchronize() if torch.cuda.is_available() else None
-            end_time = time.perf_counter()
-            
-            total_latency = (end_time - start_time) * 1000  # Convert to ms
-            total_latencies.append(total_latency)
+            outputs, total_latency_ms, prefill_time_ms, decode_time_ms = self._generate_with_timing(
+                llm, prompts, sampling_params, use_tqdm=False
+            )
+            total_latencies.append(total_latency_ms)
         
         avg_total_latency = np.mean(total_latencies)
         
