@@ -12,8 +12,8 @@ export VLLM_LOGGING_LEVEL=DEBUG
 export VLLM_DISABLE_LOG_STATS=False
 export VLLM_LOG_KV_CACHE_USAGE=True
 
-
-export VLLM_TORCH_PROFILER_DIR="./traces/"
+# Default torch profiler directory (can be overridden by command line or environment)
+DEFAULT_PROFILER_DIR="./traces/"
 
 # Default parameters
 MODEL="../Qwen3-32B/"
@@ -24,13 +24,14 @@ INPUT_LENGTHS=(64 128 256 512 1024 2048 4096 8192 16384 32768 65536)
 OUTPUT_LENGTHS=(8)
 # BATCH_SIZES=(4)
 # BATCH_SIZES=(2)
-BATCH_SIZES=(1 2 4 8 16 32 64 128 256)
+# BATCH_SIZES=(1 2 4 8 16 32 64 128 256)
+BATCH_SIZES=(8)
 # INPUT_LENGTHS=(2048)
 # OUTPUT_LENGTHS=(4)
 # BATCH_SIZES=(256)
 
-# MAX_BATCHED_TOKENS=(131072)
-MAX_BATCHED_TOKENS=(16384)
+MAX_BATCHED_TOKENS=(131072)
+# MAX_BATCHED_TOKENS=(16384)
 # MAX_BATCHED_TOKENS=(16384)
 NUM_PROMPTS=100
 REQUEST_RATE="inf"
@@ -40,6 +41,7 @@ RUN_SERVING=false
 RESUME_MODE=false
 FORCE_OVERWRITE=false
 MAX_MODEL_LEN=""  # Empty means use vLLM default
+ENABLE_PROFILER=false  # Default: disable profiler
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -83,6 +85,16 @@ while [[ $# -gt 0 ]]; do
             NUM_PROMPTS="$2"
             shift 2
             ;;
+        --enable-profiler)
+            ENABLE_PROFILER=true
+            if [ -n "$2" ] && [[ "$2" != --* ]]; then
+                export VLLM_TORCH_PROFILER_DIR="$2"
+                shift 2
+            else
+                export VLLM_TORCH_PROFILER_DIR="$DEFAULT_PROFILER_DIR"
+                shift
+            fi
+            ;;
         --run-serving)
             RUN_SERVING=true
             shift
@@ -100,6 +112,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --max-batched-tokens TOKENS      Comma-separated max batched tokens (default: 2048,4096,8192,16384)"
             echo "  --max-model-len LENGTH           Maximum model length (default: use vLLM default)"
             echo "  --num-prompts N                  Number of prompts per test (default: $NUM_PROMPTS)"
+            echo "  --enable-profiler [DIR]          Enable torch profiler (default dir: $DEFAULT_PROFILER_DIR)"
             echo "  --run-serving                    Also run serving benchmarks after latency benchmarks"
             echo "  --help                           Show this help message"
             exit 0
@@ -131,10 +144,32 @@ else
     fi
 fi
 
+# Handle profiler configuration
+# Check if VLLM_TORCH_PROFILER_DIR is already set in environment
+if [ -n "$VLLM_TORCH_PROFILER_DIR" ] && [ "$ENABLE_PROFILER" != true ]; then
+    echo "VLLM_TORCH_PROFILER_DIR is set in environment: $VLLM_TORCH_PROFILER_DIR"
+    ENABLE_PROFILER=true
+elif [ "$ENABLE_PROFILER" != true ]; then
+    # Profiler is disabled, ensure environment variable is unset
+    unset VLLM_TORCH_PROFILER_DIR
+fi
+
 # Create output and log directories
 mkdir -p "$OUTPUT_DIR"
 LOG_DIR="${OUTPUT_DIR}/logs"
 mkdir -p "$LOG_DIR"
+
+# Setup profiler directory if profiler is enabled
+if [ "$ENABLE_PROFILER" = true ]; then
+    PROFILER_BASE_DIR="$OUTPUT_DIR/traces"
+    mkdir -p "$PROFILER_BASE_DIR"
+    # Create the base profiler directory
+    export VLLM_TORCH_PROFILER_DIR="$PROFILER_BASE_DIR"
+    echo "Torch profiler enabled: $VLLM_TORCH_PROFILER_DIR"
+    echo "  Individual experiment traces will be saved to subdirectories"
+else
+    echo "Torch profiler disabled"
+fi
 
 echo "Starting vLLM Offline Latency Benchmark"
 echo "Model: $MODEL"
@@ -142,6 +177,7 @@ echo "Output directory: $OUTPUT_DIR"
 echo "Log directory: $LOG_DIR"
 echo "Resume mode: $RESUME_MODE"
 echo "Force overwrite: $FORCE_OVERWRITE"
+echo "Torch profiler: $([ "$ENABLE_PROFILER" = true ] && echo "enabled ($VLLM_TORCH_PROFILER_DIR)" || echo "disabled")"
 echo "Input lengths: ${INPUT_LENGTHS[*]}"
 echo "Output lengths: ${OUTPUT_LENGTHS[*]}"
 echo "Batch sizes: ${BATCH_SIZES[*]}"
@@ -185,7 +221,13 @@ run_latency_benchmark() {
     echo "  Result file: $result_file"
     echo "  Log file: $log_file"
     
-    # Build vLLM command with optional max-model-len parameter
+    # Store original profiler directory if profiler is enabled
+    local original_profiler_dir=""
+    if [ "$ENABLE_PROFILER" = true ]; then
+        original_profiler_dir="$VLLM_TORCH_PROFILER_DIR"
+    fi
+    
+    # Build vLLM command with optional parameters
     vllm_cmd="vllm bench latency \
         --model \"$MODEL\" \
         --input-len \"$input_len\" \
@@ -198,6 +240,21 @@ run_latency_benchmark() {
         --disable-log-stats \
         --enforce-eager \
         --disable-custom-all-reduce"
+    
+    # Add profiler flag if enabled with config-specific directory
+    if [ "$ENABLE_PROFILER" = true ]; then
+        # Create config-specific profiler directory
+        local config_profiler_dir="${VLLM_TORCH_PROFILER_DIR%/}/trace_in${input_len}_out${output_len}_bs${batch_size}_mbt${max_batched_tokens}"
+        mkdir -p "$config_profiler_dir"
+        
+        # Set the profiler directory for this specific run
+        export VLLM_TORCH_PROFILER_DIR="$config_profiler_dir"
+        
+        vllm_cmd="$vllm_cmd --profile"
+        echo "  Profiler: enabled (traces will be saved to $config_profiler_dir)"
+    else
+        echo "  Profiler: disabled"
+    fi
     
     # Add max-model-len parameter if specified
     if [ -n "$MAX_MODEL_LEN" ]; then
@@ -212,6 +269,11 @@ run_latency_benchmark() {
             echo "Failed for configuration: input=$input_len, output=$output_len, batch=$batch_size, max_batched_tokens=$max_batched_tokens"
             echo "Check log file: $log_file"
         }
+    
+    # Restore original profiler directory if it was changed
+    if [ "$ENABLE_PROFILER" = true ] && [ -n "$original_profiler_dir" ]; then
+        export VLLM_TORCH_PROFILER_DIR="$original_profiler_dir"
+    fi
 }
 
 # Note: Serving benchmarks have been moved to serving_benchmark.sh
@@ -361,6 +423,25 @@ fi
 echo ""
 echo "Results saved in: $OUTPUT_DIR"
 echo "Logs saved in: $LOG_DIR"
+
+# Report profiler traces if enabled
+if [ "$ENABLE_PROFILER" = true ]; then
+    echo "Profiler traces saved in: $VLLM_TORCH_PROFILER_DIR"
+    
+    # Count trace directories
+    trace_dirs=$(find "$VLLM_TORCH_PROFILER_DIR" -name "trace_*" -type d 2>/dev/null | wc -l)
+    if [ $trace_dirs -gt 0 ]; then
+        echo "  Number of trace directories: $trace_dirs"
+        echo "  Trace directories:"
+        find "$VLLM_TORCH_PROFILER_DIR" -name "trace_*" -type d 2>/dev/null | sort | while read dir; do
+            trace_files=$(find "$dir" -name "*.json" -o -name "*.pt" 2>/dev/null | wc -l)
+            echo "    $(basename "$dir"): $trace_files files"
+        done
+    else
+        echo "  No trace directories found"
+    fi
+fi
+
 echo ""
 echo "To view summary again:"
 if [ -f "$SUMMARY_SCRIPT" ]; then

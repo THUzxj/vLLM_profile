@@ -11,7 +11,77 @@ import os
 import sys
 from pathlib import Path
 import argparse
+import numpy as np
 
+
+def calculate_timing_statistics(data):
+    """Calculate min, variance, and other statistics for timing data."""
+    stats = {}
+    
+    # For new format with detailed timing
+    if 'total_latencies' in data:
+        total_latencies = np.array(data['total_latencies'])
+        prefill_times = np.array(data.get('prefill_times', []))
+        decode_times = np.array(data.get('decode_times', []))
+        
+        stats.update({
+            'total_latency_min': np.min(total_latencies) if len(total_latencies) > 0 else 0,
+            'total_latency_variance': np.var(total_latencies) if len(total_latencies) > 0 else 0,
+            'total_latency_std': np.std(total_latencies) if len(total_latencies) > 0 else 0,
+            'prefill_time_min': np.min(prefill_times) if len(prefill_times) > 0 else 0,
+            'prefill_time_variance': np.var(prefill_times) if len(prefill_times) > 0 else 0,
+            'prefill_time_std': np.std(prefill_times) if len(prefill_times) > 0 else 0,
+            'decode_time_min': np.min(decode_times) if len(decode_times) > 0 else 0,
+            'decode_time_variance': np.var(decode_times) if len(decode_times) > 0 else 0,
+            'decode_time_std': np.std(decode_times) if len(decode_times) > 0 else 0,
+        })
+    
+    # For old format
+    elif 'latencies' in data:
+        latencies = np.array(data['latencies'])
+        stats.update({
+            'total_latency_min': np.min(latencies) if len(latencies) > 0 else 0,
+            'total_latency_variance': np.var(latencies) if len(latencies) > 0 else 0,
+            'total_latency_std': np.std(latencies) if len(latencies) > 0 else 0,
+            'prefill_time_min': 0,
+            'prefill_time_variance': 0,
+            'prefill_time_std': 0,
+            'decode_time_min': 0,
+            'decode_time_variance': 0,
+            'decode_time_std': 0,
+        })
+    
+    return stats
+
+def calculate_serving_statistics(data):
+    """Calculate statistics for serving data."""
+    stats = {}
+    
+    # Extract timing arrays if available
+    ttft_data = data.get('ttft_ms', [])
+    tpot_data = data.get('tpot_ms', [])
+    
+    if ttft_data:
+        ttft_array = np.array(ttft_data)
+        stats.update({
+            'ttft_min': np.min(ttft_array),
+            'ttft_variance': np.var(ttft_array),
+            'ttft_std': np.std(ttft_array),
+        })
+    else:
+        stats.update({'ttft_min': 0, 'ttft_variance': 0, 'ttft_std': 0})
+    
+    if tpot_data:
+        tpot_array = np.array(tpot_data)
+        stats.update({
+            'tpot_min': np.min(tpot_array),
+            'tpot_variance': np.var(tpot_array),
+            'tpot_std': np.std(tpot_array),
+        })
+    else:
+        stats.update({'tpot_min': 0, 'tpot_variance': 0, 'tpot_std': 0})
+    
+    return stats
 
 def load_results(result_dir):
     """Load all benchmark results from the directory."""
@@ -138,6 +208,26 @@ def print_summary(latency_results, serving_results, show_details=True):
                 print(f"{config_str:<25} {total_p50:.3f}/{total_p99:.3f}   "
                       f"{prefill_p50:.3f}/{prefill_p99:.3f}     "
                       f"{decode_p50:.3f}/{decode_p99:.3f}      {prefill_ratio:.1f}%")
+        
+        # Add timing statistics summary
+        if detailed_configs:
+            print("\nTIMING STATISTICS (Min/Variance/Std):")
+            print("-" * 140)
+            print(f"{'Config':<25} {'Total Min/Var/Std':<20} {'Prefill Min/Var/Std':<22} {'Decode Min/Var/Std':<21}")
+            print(f"{'(in/out/bs/mbt)':<25} {'(s)':<20} {'(s)':<22} {'(s)':<21}")
+            print("-" * 140)
+            
+            for filename, result in detailed_configs:
+                config = result['config']
+                data = result['data']
+                stats = calculate_timing_statistics(data)
+                
+                config_str = f"{config['input_len']}/{config['output_len']}/{config['batch_size']}/{config['max_batched_tokens']}"
+                
+                print(f"{config_str:<25} "
+                      f"{stats['total_latency_min']:.3f}/{stats['total_latency_variance']:.6f}/{stats['total_latency_std']:.3f} "
+                      f"{stats['prefill_time_min']:.3f}/{stats['prefill_time_variance']:.6f}/{stats['prefill_time_std']:.3f} "
+                      f"{stats['decode_time_min']:.3f}/{stats['decode_time_variance']:.6f}/{stats['decode_time_std']:.3f}")
     
     # Serving results summary
     if serving_results and show_details:
@@ -165,6 +255,25 @@ def print_summary(latency_results, serving_results, show_details=True):
             print(f"{config['input_len']:<8} {config['output_len']:<8} "
                   f"{config['max_batched_tokens']:<10} {config['num_prompts']:<8} {ttft:<12.1f} "
                   f"{tpot:<12.1f} {throughput:<12.2f}")
+        
+        # Add serving statistics summary
+        if serving_results:
+            print("\nSERVING TIMING STATISTICS (Min/Variance/Std):")
+            print("-" * 100)
+            print(f"{'Config':<25} {'TTFT Min/Var/Std':<20} {'TPOT Min/Var/Std':<20}")
+            print(f"{'(in/out/mbt/np)':<25} {'(ms)':<20} {'(ms)':<20}")
+            print("-" * 100)
+            
+            for filename, result in sorted_serving:
+                config = result['config']
+                data = result['data']
+                stats = calculate_serving_statistics(data)
+                
+                config_str = f"{config['input_len']}/{config['output_len']}/{config['max_batched_tokens']}/{config['num_prompts']}"
+                
+                print(f"{config_str:<25} "
+                      f"{stats['ttft_min']:.1f}/{stats['ttft_variance']:.1f}/{stats['ttft_std']:.1f} "
+                      f"{stats['tpot_min']:.1f}/{stats['tpot_variance']:.1f}/{stats['tpot_std']:.1f}")
     
     print("\n" + "=" * 100)
 
@@ -180,7 +289,12 @@ def export_csv(latency_results, serving_results, output_dir):
             fieldnames = ['input_len', 'output_len', 'batch_size', 'max_batched_tokens', 
                          'avg_total_latency', 'avg_prefill_time', 'avg_decode_time', 'prefill_ratio',
                          'p50_total_latency', 'p99_total_latency', 'p50_prefill_time', 'p99_prefill_time',
-                         'p50_decode_time', 'p99_decode_time', 'throughput',
+                         'p50_decode_time', 'p99_decode_time', 
+                         # Statistics fields
+                         'total_latency_min', 'total_latency_variance', 'total_latency_std',
+                         'prefill_time_min', 'prefill_time_variance', 'prefill_time_std',
+                         'decode_time_min', 'decode_time_variance', 'decode_time_std',
+                         'throughput',
                          # Backward compatibility fields
                          'avg_latency', 'p50_latency', 'p99_latency']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -205,6 +319,9 @@ def export_csv(latency_results, serving_results, output_dir):
                     'max_batched_tokens': config['max_batched_tokens'],
                 }
                 
+                # Calculate statistics
+                stats = calculate_timing_statistics(data)
+                
                 # New detailed timing format
                 if 'avg_total_latency' in data:
                     row.update({
@@ -218,6 +335,16 @@ def export_csv(latency_results, serving_results, output_dir):
                         'p99_prefill_time': data.get('prefill_time_percentiles', {}).get('99', 0),
                         'p50_decode_time': data.get('decode_time_percentiles', {}).get('50', 0),
                         'p99_decode_time': data.get('decode_time_percentiles', {}).get('99', 0),
+                        # Statistics
+                        'total_latency_min': stats.get('total_latency_min', 0),
+                        'total_latency_variance': stats.get('total_latency_variance', 0),
+                        'total_latency_std': stats.get('total_latency_std', 0),
+                        'prefill_time_min': stats.get('prefill_time_min', 0),
+                        'prefill_time_variance': stats.get('prefill_time_variance', 0),
+                        'prefill_time_std': stats.get('prefill_time_std', 0),
+                        'decode_time_min': stats.get('decode_time_min', 0),
+                        'decode_time_variance': stats.get('decode_time_variance', 0),
+                        'decode_time_std': stats.get('decode_time_std', 0),
                         # Backward compatibility
                         'avg_latency': data.get('avg_total_latency', 0),
                         'p50_latency': data.get('total_latency_percentiles', {}).get('50', 0),
@@ -236,6 +363,16 @@ def export_csv(latency_results, serving_results, output_dir):
                         'p99_prefill_time': 0,
                         'p50_decode_time': 0,
                         'p99_decode_time': 0,
+                        # Statistics (from old format)
+                        'total_latency_min': stats.get('total_latency_min', 0),
+                        'total_latency_variance': stats.get('total_latency_variance', 0),
+                        'total_latency_std': stats.get('total_latency_std', 0),
+                        'prefill_time_min': 0,
+                        'prefill_time_variance': 0,
+                        'prefill_time_std': 0,
+                        'decode_time_min': 0,
+                        'decode_time_variance': 0,
+                        'decode_time_std': 0,
                         'avg_latency': data.get('avg_latency', 0),
                         'p50_latency': data.get('percentiles', {}).get('50', 0),
                         'p99_latency': data.get('percentiles', {}).get('99', 0),
@@ -251,7 +388,10 @@ def export_csv(latency_results, serving_results, output_dir):
         serving_csv_path = Path(output_dir) / "serving_results.csv"
         with open(serving_csv_path, 'w', newline='') as csvfile:
             fieldnames = ['input_len', 'output_len', 'max_batched_tokens', 'num_prompts',
-                         'mean_ttft_ms', 'mean_tpot_ms', 'request_throughput']
+                         'mean_ttft_ms', 'mean_tpot_ms', 'request_throughput',
+                         # Statistics fields
+                         'ttft_min', 'ttft_variance', 'ttft_std',
+                         'tpot_min', 'tpot_variance', 'tpot_std']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
             
@@ -265,6 +405,7 @@ def export_csv(latency_results, serving_results, output_dir):
             for filename, result in sorted_serving:
                 config = result['config']
                 data = result['data']
+                stats = calculate_serving_statistics(data)
                 
                 row = {
                     'input_len': config['input_len'],
@@ -273,7 +414,14 @@ def export_csv(latency_results, serving_results, output_dir):
                     'num_prompts': config['num_prompts'],
                     'mean_ttft_ms': data.get('mean_ttft_ms', 0),
                     'mean_tpot_ms': data.get('mean_tpot_ms', 0),
-                    'request_throughput': data.get('request_throughput', 0)
+                    'request_throughput': data.get('request_throughput', 0),
+                    # Statistics
+                    'ttft_min': stats.get('ttft_min', 0),
+                    'ttft_variance': stats.get('ttft_variance', 0),
+                    'ttft_std': stats.get('ttft_std', 0),
+                    'tpot_min': stats.get('tpot_min', 0),
+                    'tpot_variance': stats.get('tpot_variance', 0),
+                    'tpot_std': stats.get('tpot_std', 0),
                 }
                 writer.writerow(row)
         

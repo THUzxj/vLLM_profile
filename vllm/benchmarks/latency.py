@@ -119,6 +119,50 @@ def main(args: argparse.Namespace):
         torch.cuda.synchronize() if torch.cuda.is_available() else None
         start_time = time.perf_counter()
         
+        def log_output_lengths(outputs):
+            """Log the actual output lengths for each sentence."""
+            import sys
+            if outputs:
+                print(f"\n--- Output Length Analysis ---", file=sys.stderr)
+                for i, output in enumerate(outputs):
+                    if hasattr(output, 'outputs') and output.outputs:
+                        for j, completion in enumerate(output.outputs):
+                            if hasattr(completion, 'token_ids'):
+                                actual_length = len(completion.token_ids)
+                                print(f"Sentence {i+1}, Completion {j+1}: {actual_length} tokens", file=sys.stderr)
+                            elif hasattr(completion, 'text'):
+                                # Approximate token count from text length
+                                approx_tokens = len(completion.text.split())
+                                print(f"Sentence {i+1}, Completion {j+1}: ~{approx_tokens} tokens (approx from text)", file=sys.stderr)
+                    elif hasattr(output, 'token_ids'):
+                        actual_length = len(output.token_ids)
+                        print(f"Sentence {i+1}: {actual_length} tokens", file=sys.stderr)
+                    elif hasattr(output, 'text'):
+                        approx_tokens = len(output.text.split())
+                        print(f"Sentence {i+1}: ~{approx_tokens} tokens (approx from text)", file=sys.stderr)
+                
+                # Calculate statistics
+                all_lengths = []
+                for output in outputs:
+                    if hasattr(output, 'outputs') and output.outputs:
+                        for completion in output.outputs:
+                            if hasattr(completion, 'token_ids'):
+                                all_lengths.append(len(completion.token_ids))
+                    elif hasattr(output, 'token_ids'):
+                        all_lengths.append(len(output.token_ids))
+                
+                if all_lengths:
+                    avg_length = sum(all_lengths) / len(all_lengths)
+                    min_length = min(all_lengths)
+                    max_length = max(all_lengths)
+                    print(f"Output Length Summary: avg={avg_length:.1f}, min={min_length}, max={max_length} tokens", file=sys.stderr)
+                    
+                    # Compare with expected length
+                    expected_length = sampling_params.max_tokens if sampling_params else (beam_params.max_tokens if beam_params else "unknown")
+                    if expected_length != "unknown":
+                        print(f"Expected vs Actual: expected={expected_length}, actual_avg={avg_length:.1f}", file=sys.stderr)
+                print(f"--- End Output Length Analysis ---\n", file=sys.stderr)
+        
         # Try multiple approaches for accessing detailed timing
         engine = llm.llm_engine
         
@@ -149,6 +193,7 @@ def main(args: argparse.Namespace):
                         decode_time_ms = finished_req.decode_time * 1000
                         import sys
                         print("✓ Using detailed timing from output processor", file=sys.stderr)
+                        log_output_lengths(outputs)
                         return outputs, total_latency, prefill_time_ms, decode_time_ms
         except Exception as e:
             import sys
@@ -221,6 +266,7 @@ def main(args: argparse.Namespace):
                         
                         import sys
                         print("✓ Using detailed timing from engine core stats", file=sys.stderr)
+                        log_output_lengths(outputs)
                         return outputs, total_latency, prefill_time_ms, decode_time_ms
                 else:
                     import sys
@@ -272,6 +318,7 @@ def main(args: argparse.Namespace):
                         decode_time_ms = step_metrics['decode_time'] * 1000 if step_metrics['decode_time'] else (total_latency - prefill_time_ms)
                         import sys
                         print("✓ Using detailed timing from engine step hooks", file=sys.stderr)
+                        log_output_lengths(outputs)
                         return outputs, total_latency, prefill_time_ms, decode_time_ms
                 finally:
                     engine.step = original_step
@@ -297,6 +344,7 @@ def main(args: argparse.Namespace):
         prefill_time_ms = total_latency * 0.2
         decode_time_ms = total_latency * 0.8
         
+        log_output_lengths(outputs)
         return outputs, total_latency, prefill_time_ms, decode_time_ms
 
     def llm_generate():
@@ -322,14 +370,14 @@ def main(args: argparse.Namespace):
             llm.start_profile()
             outputs, total_latency_ms, prefill_time_ms, decode_time_ms = llm_generate()
             llm.stop_profile()
-            return None  # Profiling mode doesn't return timing data
+            # return None  # Profiling mode doesn't return timing data
         else:
             outputs, total_latency_ms, prefill_time_ms, decode_time_ms = llm_generate()
-            # Convert ms to seconds for compatibility with existing code
-            latency_seconds = total_latency_ms / 1000.0
-            prefill_seconds = prefill_time_ms / 1000.0
-            decode_seconds = decode_time_ms / 1000.0
-            return latency_seconds, prefill_seconds, decode_seconds
+        # Convert ms to seconds for compatibility with existing code
+        latency_seconds = total_latency_ms / 1000.0
+        prefill_seconds = prefill_time_ms / 1000.0
+        decode_seconds = decode_time_ms / 1000.0
+        return latency_seconds, prefill_seconds, decode_seconds
 
     print("Warming up...")
     for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
@@ -340,19 +388,30 @@ def main(args: argparse.Namespace):
         profile_dir = envs.VLLM_TORCH_PROFILER_DIR
         print(f"Profiling (results will be saved to '{profile_dir}')...")
         run_to_completion(profile_dir=profile_dir)
-        return
+        # return
 
     # Benchmark.
     latencies = []
     prefill_times = []
     decode_times = []
-    for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
-        result = run_to_completion(profile_dir=None)
+    
+    print(f"\nBenchmark Configuration:")
+    print(f"  Input length: {args.input_len} tokens")
+    print(f"  Expected output length: {args.output_len} tokens") 
+    print(f"  Batch size: {args.batch_size}")
+    print(f"  Number of iterations: {args.num_iters}")
+    
+    for i in tqdm(range(args.num_iters), desc="Profiling iterations"):
+        result = run_to_completion(profile_dir=profile_dir)
         if result is not None:  # Not in profiling mode
             latency_sec, prefill_sec, decode_sec = result
             latencies.append(latency_sec)
             prefill_times.append(prefill_sec)
             decode_times.append(decode_sec)
+            
+            # Log iteration summary
+            import sys
+            print(f"Iteration {i+1}: Total={latency_sec:.4f}s, Prefill={prefill_sec:.4f}s, Decode={decode_sec:.4f}s", file=sys.stderr)
     
     latencies = np.array(latencies)
     prefill_times = np.array(prefill_times)
@@ -392,6 +451,16 @@ def main(args: argparse.Namespace):
             "total_latency_percentiles": dict(zip(percentages, percentiles.tolist())),
             "prefill_time_percentiles": dict(zip(percentages, prefill_percentiles.tolist())),
             "decode_time_percentiles": dict(zip(percentages, decode_percentiles.tolist())),
+            # Configuration information
+            "benchmark_config": {
+                "input_length": args.input_len,
+                "expected_output_length": args.output_len,
+                "batch_size": args.batch_size,
+                "num_iterations": args.num_iters,
+                "num_warmup_iterations": args.num_iters_warmup,
+                "use_beam_search": args.use_beam_search,
+                "n_sequences": args.n,
+            },
             # Keep backward compatibility
             "avg_latency": np.mean(latencies),
             "latencies": latencies.tolist(),
