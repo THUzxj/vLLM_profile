@@ -1,0 +1,31 @@
+# Transformer Benchmarking Suite Requirements
+
+# Core ML libraries
+torch>=2.0.0
+transformers>=4.30.0
+accelerate>=0.20.0
+
+# Data processing and analysis
+pandas>=1.5.0
+numpy>=1.20.0
+
+# Visualization
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# System monitoring
+psutil>=5.8.0
+
+# Configuration and utilities
+dataclasses-json>=0.5.0
+
+# Optional: For better GPU memory management
+nvidia-ml-py3>=7.352.0; sys_platform=="linux"
+
+# Optional: For faster tokenizers
+tokenizers>=0.13.0
+
+# Development and testing (optional)
+pytest>=7.0.0
+black>=22.0.0
+flake8>=4.0.0
