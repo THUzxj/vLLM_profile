@@ -5,6 +5,7 @@ from random import randint
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 from vllm import LLM, SamplingParams
 from vllm.inputs.data import TokensPrompt
 from vllm.sampling_params import RequestOutputKind
@@ -14,6 +15,7 @@ from vllm.sampling_params import RequestOutputKind
 def decode_bench(args):
     np.random.seed(42)
 
+    os.makedirs(args.log_dir, exist_ok=True)
 
     # only 1 token per prompt to show decode performance
     prompt_token_length = args.prompt_length
@@ -24,22 +26,16 @@ def decode_bench(args):
         model=args.model,
         tensor_parallel_size=args.tp_size,
         max_model_len=args.max_model_len,
-        enforce_eager=False,
+        enforce_eager=False, # enable CUDA graph
         max_num_seqs=1024,
         # max_num_batched_tokens=40960,
         max_num_batched_tokens=args.batched_tokens,
-        # gpu_memory_utilization=0.9,
+        gpu_memory_utilization=0.9,
     )
     llm_engine = llm.llm_engine
-    # batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-    # batch_sizes = [64]
-
     batch_sizes = args.batch_sizes
 
-    # batch_sizes = [8,8]
-    # batch_sizes = [16,16,32]
-
-    data_path = os.path.join("profile_data", args.log_path)
+    data_path = os.path.join(args.log_dir, args.log_path)
     
     # Initialize CSV file with headers
     df_header = pd.DataFrame(columns=["context", "bs", "repeat_idx", "tpot", "decode_time", "total_length", "batched_tokens"])
@@ -50,7 +46,7 @@ def decode_bench(args):
     
     for bs in batch_sizes:
 
-        output_len = args.batched_tokens // bs - prompt_token_length
+        output_len = args.__dict__.get("output_len", args.batched_tokens // bs - prompt_token_length)
 
         if output_len <= 1:
             print(f"Skipping batch size {bs} due to insufficient output length, output_len={output_len}")
@@ -60,7 +56,7 @@ def decode_bench(args):
             temperature=1,
             ignore_eos=True,
             max_tokens=output_len,
-            output_kind=RequestOutputKind.FINAL_ONLY,
+            output_kind=RequestOutputKind.CUMULATIVE,
         )
 
 
@@ -87,7 +83,27 @@ def decode_bench(args):
             window = args.window_size
             total_steps = 0
             batch_outputs = []  # Store outputs for this batch
-            
+
+            ttft = None
+
+            # prefill the requests first and get the TTFT
+            while llm_engine.has_unfinished_requests():
+                start = time.perf_counter()
+                step_outputs = llm_engine.step()
+                end = time.perf_counter()
+                ttft = None
+                for output in step_outputs:
+                    if hasattr(output, 'outputs') and output.outputs:
+                        if len(output.outputs[0].token_ids) > 0:
+                            ttft = (end - start) * 1000  # in ms
+                            break
+                
+                if ttft is not None:
+                    print(f"TTFT for batch size {bs}, repeat {repeat_idx + 1}: {ttft:.2f} ms")
+                    break
+                else:
+                    print(f"Prefill step completed but no tokens generated yet for batch size {bs}, repeat {repeat_idx + 1}")
+
             while llm_engine.has_unfinished_requests():
                 start = time.perf_counter()
                 num_steps = 0
@@ -112,10 +128,13 @@ def decode_bench(args):
                         num_steps += 1
                     else:
                         break
-                total_steps += num_steps
                 current_time = time.perf_counter()
+                total_steps += num_steps
                 tpot_dur_window = (current_time - start) / num_steps
                 print(f"{total_steps=}, {bs=}, repeat={repeat_idx+1}, {tpot_dur_window * 1000:.2f}, {llm_engine.get_num_unfinished_requests()=}")
+
+                # stats = llm.llm_engine._get_stats()
+                # print(f"Running: {stats.num_running_sys} reqs, Waiting: {stats.num_waiting_sys} reqs")
 
                 total_length = prompt_token_length + total_steps
                 # Write result immediately to CSV with repeat information
@@ -127,6 +146,7 @@ def decode_bench(args):
                     "decode_time": (current_time - start),
                     "total_length": total_length,
                     "batched_tokens": total_length * bs,
+                    "ttft": ttft
                 }])
                 result_row.to_csv(data_path, mode='a', header=False, index=False)
             
@@ -153,7 +173,7 @@ def decode_bench(args):
     #         f.write(f"Repeat Index: {output_info['repeat_idx']}\n")
     #         f.write(f"Finished: {output_info['finished']}\n")
     #         f.write(f"Number of outputs: {len(output_info['outputs'])}\n")
-            
+    #
     #         # Write first few tokens of each output
     #         for j, output in enumerate(output_info['outputs']):
     #             f.write(f"  Output {j+1}: ")
@@ -214,10 +234,118 @@ def test():
                 max_model_len=max_model_len,
                 prompt_length=1,
                 window_size=128,
-                batch_sizes=[1, 4, 8, 16]
+                batch_sizes=[1, 2, 4, 8, 16, 32],
+                log_dir="profile_data_fixed"
+            )
+            decode_bench(args)
+
+
+
+def test_input_lengths():
+    import datetime
+    # model_name = "Qwen/Qwen2.5-7B"
+
+    input_lengths = [128, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240]
+
+    for model_name in ["/nfs/xjzhang/Qwen/Qwen3-4B"]:
+        # seq_length = 2048
+        # batched_tokens = 65536
+        batched_tokens = 4096*16+1
+        max_model_len = 40960
+        if model_name == "/nfs/xjzhang/Qwen/Qwen3-8B":
+            # tp_sizes = [1, 2, 4]
+            tp_sizes = [1]
+            # tp_sizes = [2, 4]
+            # tp_sizes = [4]
+        elif model_name == "/opt/tiger/open_verl/QWen2.5-32B":
+            tp_sizes = [1, 2, 4]
+        elif model_name == "/nfs/xjzhang/Qwen/Qwen3-1.7B":
+            # tp_sizes = [1, 2, 4]
+            tp_sizes = [1]
+        elif model_name == "/nfs/xjzhang/Qwen/Qwen3-4B":
+            # tp_sizes = [1, 2, 4]
+            tp_sizes = [1]
+        elif model_name == "/nfs/xjzhang/Qwen/Qwen3-14B":
+            # tp_sizes = [1, 2, 4]
+            # batched_tokens = 16384
+            # max_model_len = 16384
+
+            tp_sizes = [2, 4]
+            # batched_tokens = 16384
+            # max_model_len = 16384
+        for tp_size in tp_sizes:
+            # seq_length = 16384
+            for input_length in input_lengths:
+        
+                args = argparse.Namespace(
+                    model=model_name,
+                    tp_size=tp_size,
+                    # seq_len=seq_length,
+                    log_path=f"{model_name.split('/')[-1]}_tp{tp_size}_input_length{input_length}_batched_tokens{batched_tokens}_decode_bench_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    n_verify=1,
+                    num_repeat=1,  # Repeat each batch size 3 times
+                    batched_tokens=batched_tokens,
+                    max_model_len=max_model_len,
+                    prompt_length=input_length,
+                    output_len=100,
+                    window_size=128,
+                    batch_sizes=[1, 2, 4, 8, 16, 32],
+                    log_dir="profile_data_1103"
+                )
+                decode_bench(args)
+
+
+
+def test_one():
+    import datetime
+    # model_name = "Qwen/Qwen2.5-7B"
+    for model_name in ["/nfs/xjzhang/Qwen/Qwen3-4B"]:
+        # seq_length = 2048
+        # batched_tokens = 65536
+        batched_tokens = 4096*16+1
+        max_model_len = 40960
+        if model_name == "/nfs/xjzhang/Qwen/Qwen3-8B":
+            # tp_sizes = [1, 2, 4]
+            tp_sizes = [1]
+            # tp_sizes = [2, 4]
+            # tp_sizes = [4]
+        elif model_name == "/opt/tiger/open_verl/QWen2.5-32B":
+            tp_sizes = [1, 2, 4]
+        elif model_name == "/nfs/xjzhang/Qwen/Qwen3-1.7B":
+            # tp_sizes = [1, 2, 4]
+            tp_sizes = [1]
+        elif model_name == "/nfs/xjzhang/Qwen/Qwen3-4B":
+            # tp_sizes = [1, 2, 4]
+            tp_sizes = [1]
+        elif model_name == "/nfs/xjzhang/Qwen/Qwen3-14B":
+            # tp_sizes = [1, 2, 4]
+            # batched_tokens = 16384
+            # max_model_len = 16384
+
+            tp_sizes = [2, 4]
+            # batched_tokens = 16384
+            # max_model_len = 16384
+        for tp_size in tp_sizes:
+            # seq_length = 16384
+        
+            args = argparse.Namespace(
+                model=model_name,
+                tp_size=tp_size,
+                # seq_len=seq_length,
+                log_path=f"{model_name.split('/')[-1]}_tp{tp_size}_batched_tokens{batched_tokens}_decode_bench_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                n_verify=1,
+                num_repeat=1,  # Repeat each batch size 3 times
+                batched_tokens=batched_tokens,
+                max_model_len=max_model_len,
+                prompt_length=1,
+                window_size=128,
+                batch_sizes=[16],
+                log_dir="profile_data_fixed"
             )
             decode_bench(args)
 
 
 if __name__ == "__main__":
-    test()
+    # test()
+    test_input_lengths()
+    # test_one()
