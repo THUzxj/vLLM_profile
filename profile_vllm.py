@@ -38,11 +38,36 @@ def decode_bench(args):
     data_path = os.path.join(args.log_dir, args.log_path)
     
     # Initialize CSV file with headers
-    df_header = pd.DataFrame(columns=["context", "bs", "repeat_idx", "tpot", "decode_time", "total_length", "batched_tokens"])
+    df_header = pd.DataFrame(columns=["context", "bs", "repeat_idx", "tpot", "decode_time", "total_length", "batched_tokens", "ttft"])
     df_header.to_csv(data_path, index=False)
     
     draft_tokens = {}
     all_outputs = []  # Store all final outputs
+
+
+    # Warm up
+    print("Warming up...")
+    output_len = args.__dict__.get("output_len", 100)
+    sampling_params = SamplingParams(
+        temperature=1,
+        ignore_eos=True,
+        max_tokens=output_len,
+        output_kind=RequestOutputKind.CUMULATIVE,
+    )
+
+    warmup_iters = 2
+    warmup_bs = 2
+
+    for _ in range(warmup_iters):
+        for i in range(warmup_bs):
+            llm_engine.add_request(
+                request_id=f"warmup_{i}",
+                prompt=token_prompt,
+                params=sampling_params,
+            )
+        while llm_engine.has_unfinished_requests():
+            llm_engine.step()
+
     
     for bs in batch_sizes:
 
@@ -290,7 +315,7 @@ def test_input_lengths():
                     output_len=100,
                     window_size=128,
                     batch_sizes=[1, 2, 4, 8, 16, 32],
-                    log_dir="profile_data_1103"
+                    log_dir="profile_data_1103_2"
                 )
                 decode_bench(args)
 
