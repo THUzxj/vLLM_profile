@@ -167,6 +167,8 @@ class EngineCore:
 
         self.step_fn = (self.step if self.batch_queue is None else
                         self.step_with_batch_queue)
+        
+        self.enable_debug_logging = os.getenv("SCHEDULER_DEBUG_LOGGING") == "true"
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -283,6 +285,14 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
+
+        # log the scheduler output
+
+        if self.enable_debug_logging:
+            logger.info(
+                f"Scheduler Output: {scheduler_output}"
+            )
+
         model_output = self.execute_model_with_error_logging(
             self.model_executor.execute_model,  # type: ignore
             scheduler_output)

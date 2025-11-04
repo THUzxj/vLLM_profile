@@ -164,3 +164,21 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+
+    def __repr__(self) -> str:
+        """Simple string representation for logging purposes."""
+        new_reqs = len(self.scheduled_new_reqs)
+        cached_reqs = self.scheduled_cached_reqs.num_reqs
+        total_tokens = self.total_num_scheduled_tokens
+        finished_reqs = len(self.finished_req_ids)
+        spec_decode_reqs = len(self.scheduled_spec_decode_tokens)
+        encoder_reqs = len(self.scheduled_encoder_inputs)
+        
+        return (f"SchedulerOutput("
+                f"new_reqs={new_reqs}, "
+                f"cached_reqs={cached_reqs}, "
+                f"total_tokens={total_tokens}, "
+                f"finished_reqs={finished_reqs}, "
+                f"spec_decode_reqs={spec_decode_reqs}, "
+                f"encoder_reqs={encoder_reqs}"
+                f")")
