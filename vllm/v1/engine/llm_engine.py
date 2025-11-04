@@ -3,6 +3,7 @@
 
 from collections.abc import Mapping
 from copy import copy
+import os
 from typing import Any, Callable, Optional, Union
 
 import torch.nn as nn
@@ -123,6 +124,14 @@ class LLMEngine:
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
 
+
+        # Log step number
+        self.log_step_number = os.getenv("VLLM_LOG_STEP_NUMBER", "False") == "True"
+
+        if self.log_step_number:
+            self.step_number = 0
+            logger.info(f"LLMEngine initialized in PID {os.getpid()} with step number {self.step_number}")
+
     @classmethod
     def from_vllm_config(
         cls,
@@ -238,6 +247,10 @@ class LLMEngine:
             self.engine_core.add_request(child_request)
 
     def step(self) -> Union[list[RequestOutput], list[PoolingRequestOutput]]:
+
+        if self.log_step_number:
+            logger.info(f"LLMEngine step called in PID {os.getpid()} with step number {self.step_number}")
+            self.step_number += 1
 
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
