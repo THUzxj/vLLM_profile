@@ -19,8 +19,6 @@ def decode_bench(args):
 
     # only 1 token per prompt to show decode performance
     prompt_token_length = args.prompt_length
-    prompt_token_ids = [randint(0, 8192) for _ in range(prompt_token_length)]
-    token_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
     
     llm = LLM(
         model=args.model,
@@ -38,7 +36,7 @@ def decode_bench(args):
     data_path = os.path.join(args.log_dir, args.log_path)
     
     # Initialize CSV file with headers
-    df_header = pd.DataFrame(columns=["context", "bs", "repeat_idx", "tpot", "decode_time", "total_length", "batched_tokens", "ttft"])
+    df_header = pd.DataFrame(columns=["context", "prompt_length", "bs", "repeat_idx", "tpot", "decode_time", "total_length", "batched_tokens", "ttft"])
     df_header.to_csv(data_path, index=False)
     
     draft_tokens = {}
@@ -60,6 +58,8 @@ def decode_bench(args):
 
     for _ in range(warmup_iters):
         for i in range(warmup_bs):
+            prompt_token_ids = [randint(0, 8192) for _ in range(prompt_token_length)]
+            token_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
             llm_engine.add_request(
                 request_id=f"warmup_{i}",
                 prompt=token_prompt,
@@ -97,6 +97,8 @@ def decode_bench(args):
             batch_request_ids = []  # Track request IDs for this batch
             for i in range(bs):
                 request_id = f"{bs}_{repeat_idx}_{rid}"  # More descriptive ID
+                prompt_token_ids = [randint(0, 8192) for _ in range(prompt_token_length)]
+                token_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
                 llm_engine.add_request(
                     request_id=request_id,
                     prompt=token_prompt,
@@ -165,6 +167,7 @@ def decode_bench(args):
                 # Write result immediately to CSV with repeat information
                 result_row = pd.DataFrame([{
                     "context": total_steps,
+                    "prompt_length": prompt_token_length,
                     "bs": bs,
                     "repeat_idx": repeat_idx,
                     "tpot": tpot_dur_window * 1000,
@@ -270,7 +273,9 @@ def test_input_lengths():
     import datetime
     # model_name = "Qwen/Qwen2.5-7B"
 
-    input_lengths = [128, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240]
+    # input_lengths = [128, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240]
+
+    input_lengths = [1024, 4096]
 
     for model_name in ["/nfs/xjzhang/Qwen/Qwen3-4B"]:
         # seq_length = 2048
@@ -314,8 +319,8 @@ def test_input_lengths():
                     prompt_length=input_length,
                     output_len=100,
                     window_size=128,
-                    batch_sizes=[1, 2, 4, 8, 16, 32],
-                    log_dir="profile_data_1103_2"
+                    batch_sizes=[1, 2, 4, 8, 12, 16, 32],
+                    log_dir="profile_data_1103_5"
                 )
                 decode_bench(args)
 
