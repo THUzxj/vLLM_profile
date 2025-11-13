@@ -33,6 +33,8 @@ from vllm.distributed import (
     destroy_model_parallel,
 )
 
+os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
+
 
 def cleanup():
     destroy_model_parallel()
@@ -186,10 +188,17 @@ def benchmark_vllm_with_green_ctx(args):
             main_sm_count = sm_counts[0]
             
             # Set the stream as current
+            def trace_handler(prof):
+                prof.export_chrome_trace(
+                    os.path.join(
+                        args.log_dir,
+                        f"vllm_green_ctx_sm{sm_size}_trace.json"
+                    )
+                )
+                print(f"Trace for SM partition {sm_size} saved.")
+            
             with torch.cuda.stream(main_stream):
                 # Create vLLM instance
-                print(f"Creating vLLM instance on stream with {main_sm_count} SMs...")
-                
                 llm = LLM(
                     model=args.model,
                     tensor_parallel_size=args.tp_size,
@@ -197,88 +206,207 @@ def benchmark_vllm_with_green_ctx(args):
                     enforce_eager=False,
                     max_num_seqs=1024,
                     max_num_batched_tokens=args.batched_tokens,
-                    gpu_memory_utilization=0.6,
+                    gpu_memory_utilization=0.45,
                 )
                 llm_engine = llm.llm_engine
-                
-                # Test different batch sizes
-                for batch_size in args.batch_sizes:
-                    prompt_length = args.prompt_length
-                    output_length = args.output_length
-                    
-                    sampling_params = SamplingParams(
-                        temperature=1,
-                        ignore_eos=True,
-                        max_tokens=output_length,
-                        output_kind=RequestOutputKind.CUMULATIVE,
-                    )
-                    
-                    print(f"\n  Batch size: {batch_size}")
-                    
-                    # Run multiple repeats
-                    for repeat_idx in range(args.num_repeat):
-                        # Clear previous requests
-                        while llm_engine.has_unfinished_requests():
-                            llm_engine.step()
-                        
-                        # Add requests
-                        request_ids = []
-                        for i in range(batch_size):
-                            # Create prompt tokens
-                            prompt_token_ids = [randint(0, 8192) for _ in range(prompt_length)]
-                            token_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+                # Run profiling only when requested. Otherwise run the same workload
+                # without torch/vLLM profiling to avoid trace export and overhead.
+                if args.profile:
+                    llm.start_profile()
 
-                            request_id = f"req_{partition_idx}_{sm_size}_{batch_size}_{repeat_idx}_{i}"
-                            llm_engine.add_request(
-                                request_id=request_id,
-                                prompt=token_prompt,
-                                params=sampling_params,
+                    with torch.profiler.profile(
+                        activities=[torch.profiler.ProfilerActivity.CUDA,
+                                    torch.profiler.ProfilerActivity.CPU],
+                        with_stack=True,
+                        record_shapes=True,
+                        on_trace_ready=trace_handler
+                    ) as prof:
+                        print(f"Creating vLLM instance on stream with {main_sm_count} SMs...")
+                        # Test the stream
+                        a = torch.randn(4096*1024, device=torch.cuda.current_device())
+                        b = torch.randn(4096*1024, device=torch.cuda.current_device())
+                        c = torch.matmul(a, b)
+
+                        # Test different batch sizes
+                        for batch_size in args.batch_sizes:
+                            prompt_length = args.prompt_length
+                            output_length = args.output_length
+
+                            sampling_params = SamplingParams(
+                                temperature=1,
+                                ignore_eos=True,
+                                max_tokens=output_length,
+                                output_kind=RequestOutputKind.CUMULATIVE,
                             )
-                            request_ids.append(request_id)
-                        
-                        ttft = None
-                        decode_steps = 0
-                        step_times = []
-                        
-                        # Prefill phase
-                        prefill_start = time.perf_counter()
-                        while llm_engine.has_unfinished_requests() and ttft is None:
-                            step_start = time.perf_counter()
-                            step_outputs = llm_engine.step()
-                            step_end = time.perf_counter()
-                            
-                            for output in step_outputs:
-                                if hasattr(output, 'outputs') and output.outputs:
-                                    if len(output.outputs[0].token_ids) > 0:
-                                        ttft = (step_end - step_start) * 1000  # ms
+
+                            print(f"\n  Batch size: {batch_size}")
+
+                            # Run multiple repeats
+                            for repeat_idx in range(args.num_repeat):
+                                # Clear previous requests
+                                while llm_engine.has_unfinished_requests():
+                                    llm_engine.step()
+
+                                # Add requests
+                                request_ids = []
+                                for i in range(batch_size):
+                                    # Create prompt tokens
+                                    prompt_token_ids = [randint(0, 8192) for _ in range(prompt_length)]
+                                    token_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+
+                                    request_id = f"req_{partition_idx}_{sm_size}_{batch_size}_{repeat_idx}_{i}"
+                                    llm_engine.add_request(
+                                        request_id=request_id,
+                                        prompt=token_prompt,
+                                        params=sampling_params,
+                                    )
+                                    request_ids.append(request_id)
+
+                                ttft = None
+                                decode_steps = 0
+                                step_times = []
+
+                                # Prefill phase
+                                prefill_start = time.perf_counter()
+                                while llm_engine.has_unfinished_requests() and ttft is None:
+                                    step_start = time.perf_counter()
+                                    step_outputs = llm_engine.step()
+                                    step_end = time.perf_counter()
+
+                                    for output in step_outputs:
+                                        if hasattr(output, 'outputs') and output.outputs:
+                                            if len(output.outputs[0].token_ids) > 0:
+                                                ttft = (step_end - step_start) * 1000  # ms
+                                                break
+
+                                    if ttft is not None:
                                         break
-                            
-                            if ttft is not None:
-                                break
-                        
-                        # Decode phase
-                        decode_start = time.perf_counter()
-                        while llm_engine.has_unfinished_requests():
-                            step_start = time.perf_counter()
-                            step_outputs = llm_engine.step()
-                            step_end = time.perf_counter()
-                            
-                            decode_steps += 1
-                            step_times.append((step_end - step_start) * 1000)  # ms
-                        
-                        decode_end = time.perf_counter()
-                        
-                        # Calculate metrics
-                        if decode_steps > 0:
-                            tpot_ms = np.mean(step_times)
-                        else:
-                            tpot_ms = 0
-                        
-                        total_time = (decode_end - prefill_start) * 1000  # ms
-                        
-                        print(f"    Repeat {repeat_idx + 1}: TPOT={tpot_ms:.2f}ms, "
-                              f"TTFT={ttft:.2f}ms, Total={total_time:.2f}ms")
-                        
+
+                                # Decode phase
+                                decode_start = time.perf_counter()
+                                while llm_engine.has_unfinished_requests():
+                                    step_start = time.perf_counter()
+                                    step_outputs = llm_engine.step()
+                                    step_end = time.perf_counter()
+
+                                    decode_steps += 1
+                                    step_times.append((step_end - step_start) * 1000)  # ms
+
+                                decode_end = time.perf_counter()
+
+                                # Calculate metrics
+                                if decode_steps > 0:
+                                    tpot_ms = np.mean(step_times)
+                                else:
+                                    tpot_ms = 0
+
+                                total_time = (decode_end - prefill_start) * 1000  # ms
+
+                                print(f"    Repeat {repeat_idx + 1}: TPOT={tpot_ms:.2f}ms, "
+                                    f"TTFT={ttft:.2f}ms, Total={total_time:.2f}ms")
+
+                            # Write result to CSV
+                            result_row = pd.DataFrame([{
+                                "sm_partition_count": sm_size,
+                                "stream_id": 0,
+                                "sm_count": main_sm_count,
+                                "batch_size": batch_size,
+                                "prompt_length": prompt_length,
+                                "decode_steps": decode_steps,
+                                "tpot_ms": tpot_ms,
+                                "ttft_ms": ttft if ttft else 0,
+                                "total_time_ms": total_time,
+                                "config_id": f"{partition_idx}_{sm_size}"
+                            }])
+                            result_row.to_csv(output_path, mode='a', header=False, index=False)
+
+                    llm.stop_profile()
+                else:
+                    # No profiling: run the exact same workload without profiler
+                    print(f"Creating vLLM instance on stream with {main_sm_count} SMs (no profile)...")
+                    # Test the stream
+                    a = torch.randn(4096*1024, device=torch.cuda.current_device())
+                    b = torch.randn(4096*1024, device=torch.cuda.current_device())
+                    c = torch.matmul(a, b)
+
+                    # Test different batch sizes
+                    for batch_size in args.batch_sizes:
+                        prompt_length = args.prompt_length
+                        output_length = args.output_length
+
+                        sampling_params = SamplingParams(
+                            temperature=1,
+                            ignore_eos=True,
+                            max_tokens=output_length,
+                            output_kind=RequestOutputKind.CUMULATIVE,
+                        )
+
+                        print(f"\n  Batch size: {batch_size}")
+
+                        # Run multiple repeats
+                        for repeat_idx in range(args.num_repeat):
+                            # Clear previous requests
+                            while llm_engine.has_unfinished_requests():
+                                llm_engine.step()
+
+                            # Add requests
+                            request_ids = []
+                            for i in range(batch_size):
+                                # Create prompt tokens
+                                prompt_token_ids = [randint(0, 8192) for _ in range(prompt_length)]
+                                token_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+
+                                request_id = f"req_{partition_idx}_{sm_size}_{batch_size}_{repeat_idx}_{i}"
+                                llm_engine.add_request(
+                                    request_id=request_id,
+                                    prompt=token_prompt,
+                                    params=sampling_params,
+                                )
+                                request_ids.append(request_id)
+
+                            ttft = None
+                            decode_steps = 0
+                            step_times = []
+
+                            # Prefill phase
+                            prefill_start = time.perf_counter()
+                            while llm_engine.has_unfinished_requests() and ttft is None:
+                                step_start = time.perf_counter()
+                                step_outputs = llm_engine.step()
+                                step_end = time.perf_counter()
+
+                                for output in step_outputs:
+                                    if hasattr(output, 'outputs') and output.outputs:
+                                        if len(output.outputs[0].token_ids) > 0:
+                                            ttft = (step_end - step_start) * 1000  # ms
+                                            break
+
+                                if ttft is not None:
+                                    break
+
+                            # Decode phase
+                            decode_start = time.perf_counter()
+                            while llm_engine.has_unfinished_requests():
+                                step_start = time.perf_counter()
+                                step_outputs = llm_engine.step()
+                                step_end = time.perf_counter()
+
+                                decode_steps += 1
+                                step_times.append((step_end - step_start) * 1000)  # ms
+
+                            decode_end = time.perf_counter()
+
+                            # Calculate metrics
+                            if decode_steps > 0:
+                                tpot_ms = np.mean(step_times)
+                            else:
+                                tpot_ms = 0
+
+                            total_time = (decode_end - prefill_start) * 1000  # ms
+
+                            print(f"    Repeat {repeat_idx + 1}: TPOT={tpot_ms:.2f}ms, "
+                                f"TTFT={ttft:.2f}ms, Total={total_time:.2f}ms")
+
                         # Write result to CSV
                         result_row = pd.DataFrame([{
                             "sm_partition_count": sm_size,
@@ -389,9 +517,9 @@ def main():
                         help='Model path')
     parser.add_argument('--tp-size', type=int, default=1,
                         help='Tensor parallel size')
-    parser.add_argument('--max-model-len', type=int, default=4096,
+    parser.add_argument('--max-model-len', type=int, default=2048,
                         help='Max model length')
-    parser.add_argument('--batched-tokens', type=int, default=16384,
+    parser.add_argument('--batched-tokens', type=int, default=4096,
                         help='Max batched tokens')
     parser.add_argument('--prompt-length', type=int, default=512,
                         help='Prompt length')
@@ -404,6 +532,10 @@ def main():
                         help='SM partition sizes to test')
     parser.add_argument('--num-repeat', type=int, default=3,
                         help='Number of repeats for each configuration')
+    parser.add_argument('--warmup-iters', type=int, default=2,
+                        help='Number of warmup iterations')
+    parser.add_argument('--warmup-bs', type=int, default=2,
+                        help='Batch size for warmup')
     parser.add_argument('--log-dir', type=str, default='profile_green_ctx',
                         help='Output directory for logs')
     parser.add_argument('--log-path', type=str, 
@@ -411,6 +543,8 @@ def main():
                         help='Output CSV filename')
     parser.add_argument('--plot', action='store_true',
                         help='Generate comparison plots')
+    parser.add_argument('--profile', action='store_true',
+                        help='Enable profiling and trace export')
     
     args = parser.parse_args()
     
@@ -422,6 +556,7 @@ def main():
     print(f"Batch sizes: {args.batch_sizes}")
     print(f"SM partition sizes: {args.sm_partition_sizes}")
     print(f"Num repeats: {args.num_repeat}")
+    print(f"Profiling enabled: {args.profile}")
     print("="*60)
     
     # Run benchmark

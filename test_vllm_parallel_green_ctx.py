@@ -153,6 +153,7 @@ def split_device_green_ctx(
 
 
 def worker_run_on_stream(
+    llm,
     stream_idx: int, 
     stream: torch.cuda.Stream,
     sm_count: int,
@@ -178,15 +179,15 @@ def worker_run_on_stream(
         with torch.cuda.stream(stream):
             # Create independent LLM instance
             print(f"[worker {stream_idx}] creating LLM instance...")
-            llm = LLM(
-                model=args.model,
-                tensor_parallel_size=args.tp_size,
-                max_model_len=args.max_model_len,
-                enforce_eager=False,
-                max_num_seqs=1024,
-                max_num_batched_tokens=args.batched_tokens,
-                gpu_memory_utilization=0.45,
-            )
+            # llm = LLM(
+            #     model=args.model,
+            #     tensor_parallel_size=args.tp_size,
+            #     max_model_len=args.max_model_len,
+            #     enforce_eager=False,
+            #     max_num_seqs=1024,
+            #     max_num_batched_tokens=args.batched_tokens,
+            #     gpu_memory_utilization=0.45,
+            # )
             llm_engine = llm.llm_engine
             
             sampling_params = SamplingParams(
@@ -356,13 +357,33 @@ def benchmark_vllm_parallel_green_ctx(args):
     # Create barrier for synchronizing all worker threads
     # Barrier count = num_threads + 1 (main thread waits too to ensure all ready)
     barrier = threading.Barrier(num_streams)
+
+    # Lauch LLM engines
+    print("Launching LLM engines on each stream...")
+
+    llms = []
+    for stream_idx, (stream, sm_count) in enumerate(zip(streams, sm_counts)):
+        with torch.cuda.stream(stream):
+            print(f"[main] creating LLM engine for stream {stream_idx} with {sm_count} SMs")
+            llm = LLM(
+                model=args.model,
+                tensor_parallel_size=args.tp_size,
+                max_model_len=args.max_model_len,
+                enforce_eager=False,
+                max_num_seqs=1024,
+                max_num_batched_tokens=args.batched_tokens,
+                gpu_memory_utilization=0.45,
+            )
+            llms.append(llm)
+            print(f"[main] LLM engine for stream {stream_idx} created")
+
     
     # Launch worker threads
     print(f"\nLaunching {num_streams} worker threads...")
     for stream_idx, (stream, sm_count) in enumerate(zip(streams, sm_counts)):
         t = threading.Thread(
             target=worker_run_on_stream,
-            args=(stream_idx, stream, sm_count, args, results, results_lock, barrier),
+            args=(llms[stream_idx], stream_idx, stream, sm_count, args, results, results_lock, barrier),
             daemon=False
         )
         t.start()
@@ -392,9 +413,9 @@ def main():
                         help='Model path')
     parser.add_argument('--tp-size', type=int, default=1,
                         help='Tensor parallel size')
-    parser.add_argument('--max-model-len', type=int, default=4096,
+    parser.add_argument('--max-model-len', type=int, default=2048,
                         help='Max model length')
-    parser.add_argument('--batched-tokens', type=int, default=16384,
+    parser.add_argument('--batched-tokens', type=int, default=4096,
                         help='Max batched tokens')
     parser.add_argument('--prompt-length', type=int, default=512,
                         help='Prompt length')
