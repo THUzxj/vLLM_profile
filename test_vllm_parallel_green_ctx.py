@@ -278,10 +278,15 @@ def worker_run_on_stream(
                         "total_time_ms": total_time_ms,
                         "finish_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
                     }
-                    
+
+                    # Write result immediately to CSV (thread-safe using the lock)
+                    output_path = os.path.join(args.log_dir, args.log_path)
                     with lock:
+                        # Append single-row CSV without header
+                        pd.DataFrame([result_row]).to_csv(output_path, mode='a', header=False, index=False)
+                        # Keep in-memory copy if caller wants to inspect later
                         results.append(result_row)
-                    
+
                     print(f"[worker {stream_idx}] bs={batch_size} rep={repeat_idx} "
                           f"tpot={tpot_ms:.2f}ms ttft={ttft_ms:.2f}ms total={total_time_ms:.2f}ms")
             
@@ -394,12 +399,10 @@ def benchmark_vllm_parallel_green_ctx(args):
     for t in threads:
         t.join()
     
-    # Write all results to CSV
+    # Results are flushed incrementally by workers. Report summary.
     if results:
-        df_results = pd.DataFrame(results)
-        df_results.to_csv(output_path, mode='a', header=False, index=False)
         print(f"\n{'='*60}")
-        print(f"Saved {len(results)} measurements to {output_path}")
+        print(f"Collected {len(results)} measurements (already flushed to {output_path})")
         print(f"{'='*60}\n")
     else:
         print("No results were collected.")

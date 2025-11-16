@@ -1,3 +1,5 @@
 pandas
 scipy
 numpy
+cuda-python==12.9.4
+flash-attn

@@ -26,7 +26,7 @@ import pandas as pd
 from cuda.bindings.driver import CUdevice, CUdevResource
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-os.environ["TORCH_PROFILER_DIR"] = "./torch_profile"
+# os.environ["TORCH_PROFILER_DIR"] = "./torch_profile"
 
 
 def cleanup():
