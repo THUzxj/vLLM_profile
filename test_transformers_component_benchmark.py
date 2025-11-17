@@ -361,8 +361,13 @@ def benchmark_component(
         # Also provide a single tensor fallback for non-RoPE models
         pos_emb_single = torch.zeros(bsz, seq_len, hidden_dim, dtype=dtype, device=device)
         
-        # attention mask: use 1s (no masking). Many models accept (bsz, seq_len) or (bsz, 1, 1, seq_len)
-        attn_mask = torch.ones(bsz, seq_len, dtype=dtype, device=device)
+        # Generate proper 4D causal attention mask: (bsz, 1, seq_len, seq_len)
+        # Causal mask has -inf (or very negative value) for future positions, 0 for valid positions
+        causal_mask = torch.triu(
+            torch.full((seq_len, seq_len), float('-inf'), dtype=dtype, device=device),
+            diagonal=1
+        )
+        attn_mask = causal_mask.unsqueeze(0).unsqueeze(0).expand(bsz, 1, seq_len, seq_len)
         return pos_emb_rope, pos_emb_single, attn_mask
 
     def invoke_component(module: torch.nn.Module, hidden: torch.Tensor):
@@ -575,7 +580,7 @@ def benchmark_components_with_green_ctx(args):
     # Extract components
     components = extract_attention_and_ffn_layers(model)
     print(f"Found {len(components)} components (attention + FFN layers)")
-    print_available_components(components)
+    # print_available_components(components)
     
     # Filter components if component_name is specified
     if args.component_name:
