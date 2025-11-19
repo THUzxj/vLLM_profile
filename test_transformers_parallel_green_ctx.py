@@ -35,7 +35,16 @@ import torch
 import numpy as np
 import pandas as pd
 from cuda.bindings.driver import CUdevice, CUdevResource
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import modeling_qwen3_2 as local_qwen
+except ImportError:
+    local_qwen = None
 
 
 def cleanup():
@@ -168,18 +177,25 @@ def measure_generation_with_timing(model, tokenizer, inputs, output_length, devi
         input_ids = batch_input_ids.clone()
         attention_mask = inputs.get("attention_mask", None)
         
+        layer_records = []
         for token_idx in range(output_length):
             token_gen_start = time.perf_counter()
             
             # Generate one token
-            outputs = model(
+            out = model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 return_dict=True
             )
+            if isinstance(out, tuple):
+                outputs, layer_record_times = out
+            else:
+                outputs = out
+                layer_record_times = None
             logits = outputs.logits[:, -1, :]
             next_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
-            
+
+            torch.cuda.synchronize()
             token_gen_end = time.perf_counter()
             token_time_ms = (token_gen_end - token_gen_start) * 1000
             
@@ -197,6 +213,8 @@ def measure_generation_with_timing(model, tokenizer, inputs, output_length, devi
                     # Keep padding subsequent tokens for consistent measurement
                     pass
             
+            if layer_record_times is not None:
+                layer_records.append(layer_record_times)
             # Append generated tokens
             input_ids = torch.cat([input_ids, next_token_ids], dim=-1)
 
@@ -213,7 +231,7 @@ def measure_generation_with_timing(model, tokenizer, inputs, output_length, devi
     # Average generated tokens per sample
     generated_tokens = float(np.mean(generated_counts))
 
-    return ttft_ms, tpot_ms, total_time_ms, int(generated_tokens)
+    return ttft_ms, tpot_ms, total_time_ms, int(generated_tokens), layer_records
 
 
 def worker_run_on_stream(
@@ -256,7 +274,7 @@ def worker_run_on_stream(
             )
             inputs = {k: v.to(stream.device) for k, v in inputs.items()}
 
-            ttft_ms, tpot_ms, total_time_ms, generation_steps = measure_generation_with_timing(
+            ttft_ms, tpot_ms, total_time_ms, generation_steps, layer_records = measure_generation_with_timing(
                     model, tokenizer, inputs, args.output_length, stream.device
                 )
                 
@@ -287,7 +305,7 @@ def worker_run_on_stream(
                     inputs = {k: v.to(stream.device) for k, v in inputs.items()}
                     
                     # Measure generation with TTFT and TPOT
-                    ttft_ms, tpot_ms, total_time_ms, generation_steps = measure_generation_with_timing(
+                    ttft_ms, tpot_ms, total_time_ms, generation_steps, layer_records = measure_generation_with_timing(
                         model, tokenizer, inputs, args.output_length, stream.device
                     )
                     
@@ -311,6 +329,27 @@ def worker_run_on_stream(
                         pd.DataFrame([result_row]).to_csv(output_path, mode='a', header=False, index=False)
                         # Keep in-memory copy for summary if desired
                         results.append(result_row)
+
+                    try:
+                        json_name = (
+                            f"layer_times_stream{stream_idx}_sm{sm_count}_bs{batch_size}_rep{repeat_idx}_"
+                            f"pl{prompt_length}_ol{args.output_length}.json"
+                        )
+                        json_path = os.path.join(args.log_dir, json_name)
+                        print(f"[worker {stream_idx}] writing JSON to {json_path}")
+                        with open(json_path, 'w') as fh:
+                            json.dump({
+                                "stream_idx": stream_idx,
+                                "sm_count": sm_count,
+                                "batch_size": batch_size,
+                                "repeat_idx": repeat_idx,
+                                "prompt_length": prompt_length,
+                                "output_length": args.output_length,
+                                "layer_records": layer_records,
+                            }, fh)
+                    except Exception as e:
+                        print(f"[worker {stream_idx}] error writing JSON: {e}")
+                        pass
 
                     print(f"[worker {stream_idx}] bs={batch_size} rep={repeat_idx} "
                           f"tpot={tpot_ms:.2f}ms ttft={ttft_ms:.2f}ms total={total_time_ms:.2f}ms")
@@ -380,20 +419,28 @@ def benchmark_transformers_parallel_green_ctx(args):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model_kwargs = {
-        "attn_implementation": args.attention_impl if hasattr(args, 'attention_impl') else 'default'
-    }
-
-    # Load model once (will be shared across streams)
     print(f"Loading model from {args.model}...")
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        torch_dtype=torch.float16,
-        device_map="cuda:0",
-        trust_remote_code=True,
-        **model_kwargs
-    )
-    model.eval()
+    model = None
+    if local_qwen is not None and 'qwen3' in args.model.lower():
+        try:
+            model = local_qwen.Qwen3ForCausalLM.from_pretrained(
+                args.model,
+                device_map="cuda:0",
+                trust_remote_code=True,
+                dtype=torch.float16,
+            )
+            model.eval()
+        except Exception:
+            model = None
+    if model is None:
+        from transformers import AutoModelForCausalLM
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model,
+            torch_dtype=torch.float16,
+            device_map="cuda:0",
+            trust_remote_code=True,
+        )
+        model.eval()
     print("Model loaded successfully")
 
     # Shared results list and lock

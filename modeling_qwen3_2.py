@@ -23,6 +23,7 @@ from typing import Callable, Optional, Union
 
 import torch
 from torch import nn
+import time
 
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
@@ -316,6 +317,13 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
             except Exception:
                 print("[QWEN_SHAPES] Qwen3DecoderLayer: failed to print pre-attn shapes")
 
+        record_times = {}
+
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start = time.perf_counter()
+        start_event.record()
+
         attn_out, attn_weights = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -326,6 +334,13 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
             position_embeddings=position_embeddings,
             **kwargs,
         )
+
+        end = time.perf_counter()
+        end_event.record()
+        torch.cuda.synchronize()
+        record_times["attn"] = end - start
+
+        record_times["attn_cuda"] = start_event.elapsed_time(end_event)
 
         if DEBUG_SHAPES:
             try:
@@ -339,9 +354,19 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
+        # Fully Connected
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start = time.perf_counter()
+        start_event.record()
         hidden_states = self.mlp(hidden_states)
+        end = time.perf_counter()
+        end_event.record()
+        torch.cuda.synchronize()
+        record_times['ffn'] = end - start
+        record_times['ffn_cuda'] = start_event.elapsed_time(end_event)
         hidden_states = residual + hidden_states
-        return hidden_states
+        return hidden_states, record_times
 
 
 @auto_docstring
@@ -486,6 +511,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
             except Exception:
                 print("[QWEN_SHAPES] Qwen3Model: failed to print position_embeddings shapes")
 
+        layer_record_times = []
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             if DEBUG_SHAPES:
                 try:
@@ -493,7 +519,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 except Exception:
                     pass
 
-            hidden_states = decoder_layer(
+            hidden_states, record_times = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask_mapping[decoder_layer.attention_type],
                 position_ids=position_ids,
@@ -503,6 +529,8 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
+
+            layer_record_times.append(record_times)
 
             if DEBUG_SHAPES:
                 try:
@@ -514,7 +542,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values if use_cache else None,
-        )
+        ), layer_record_times
 
 
 @auto_docstring
@@ -569,7 +597,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
-        outputs: BaseModelOutputWithPast = self.model(
+        outputs, layer_record_times = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -595,7 +623,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-        )
+        ), layer_record_times
 
 
 class Qwen3ForSequenceClassification(GenericForSequenceClassification, Qwen3PreTrainedModel):
