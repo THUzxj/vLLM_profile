@@ -17,7 +17,7 @@ import gc
 import os
 import sys
 import time
-from typing import List, Tuple, Dict, Callable
+from typing import List, Tuple, Dict, Callable, Optional
 from random import randint
 from pathlib import Path
 
@@ -39,6 +39,35 @@ try:
     import modeling_qwen3_2 as local_qwen
 except ImportError:
     local_qwen = None
+
+
+class BenchmarkCache:
+    """Minimal cache object implementing the update API expected by HF attention layers."""
+
+    def __init__(self, past_key: Optional[torch.Tensor], past_value: Optional[torch.Tensor]):
+        self.past_key = past_key
+        self.past_value = past_value
+
+    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+        if self.past_key is not None and self.past_value is not None:
+            # Concatenate cached prefix along the sequence dimension
+            key_states = torch.cat([self.past_key, key_states], dim=2)
+            value_states = torch.cat([self.past_value, value_states], dim=2)
+        return key_states, value_states
+
+    def __iter__(self):
+        yield self.past_key
+        yield self.past_value
+
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, idx):
+        if idx == 0:
+            return self.past_key
+        if idx == 1:
+            return self.past_value
+        raise IndexError(idx)
 
 
 def get_embeddings_from_token_ids(
@@ -71,18 +100,21 @@ def get_embeddings_from_token_ids(
             input_ids = input_ids.repeat(batch_size, 1)
         elif input_ids.size(0) != batch_size:
             # repeat or truncate to match batch_size
-            input_ids = input_ids.repeat(batch_size // input_ids.size(0) + 1, 1)[:batch_size]
+            input_ids = input_ids.repeat(
+                batch_size // input_ids.size(0) + 1, 1)[:batch_size]
     else:
         # try to determine vocab size
         vocab_size = getattr(tokenizer, "vocab_size", None)
         if vocab_size is None:
             try:
-                vocab_size = tokenizer.model_maximum_features if hasattr(tokenizer, 'model_maximum_features') else None
+                vocab_size = tokenizer.model_maximum_features if hasattr(
+                    tokenizer, 'model_maximum_features') else None
             except Exception:
                 vocab_size = None
         if not vocab_size or vocab_size <= 0:
             vocab_size = 50257
-        input_ids = torch.randint(0, vocab_size, (batch_size, seq_length), device=device)
+        input_ids = torch.randint(
+            0, vocab_size, (batch_size, seq_length), device=device)
 
     # Get embedding layer
     emb_layer = None
@@ -94,10 +126,12 @@ def get_embeddings_from_token_ids(
         emb_layer = model.model.embed_tokens
 
     if emb_layer is None:
-        raise RuntimeError("Embedding layer not found on model; cannot produce input embeddings")
+        raise RuntimeError(
+            "Embedding layer not found on model; cannot produce input embeddings")
 
     # Ensure input_ids on same device as embedding layer
-    input_ids = input_ids.to(next(emb_layer.parameters()).device if any(True for _ in emb_layer.parameters()) else device)
+    input_ids = input_ids.to(next(emb_layer.parameters()).device if any(
+        True for _ in emb_layer.parameters()) else device)
 
     with torch.no_grad():
         embeddings = emb_layer(input_ids)
@@ -198,7 +232,7 @@ def split_device_green_ctx(
 ) -> Tuple[List[torch.Stream], List[CUdevResource]]:
     """
     Split the device into multiple green contexts.
-    
+
     Returns:
         streams: List of torch.Streams for each group (including remaining)
         resources: List of CUdevResource for each group (including remaining)
@@ -259,7 +293,8 @@ def extract_attention_and_ffn_layers(model) -> Dict[str, Callable]:
 
             # Heuristics for attention modules: class name contains 'Attention' or module has q/k/v proj
             cls_name = module.__class__.__name__.lower()
-            has_qkv = any(hasattr(module, attr) for attr in ('q_proj', 'k_proj', 'v_proj', 'qkv_proj', 'q', 'k', 'v'))
+            has_qkv = any(hasattr(module, attr) for attr in (
+                'q_proj', 'k_proj', 'v_proj', 'qkv_proj', 'q', 'k', 'v'))
             if 'attention' in cls_name or 'selfattn' in cls_name or 'multihead' in cls_name or has_qkv:
                 key = f"{lname}_attn"
                 components[key] = module
@@ -273,13 +308,15 @@ def extract_attention_and_ffn_layers(model) -> Dict[str, Callable]:
 
             # Detect sequential blocks with Linear layers -> potential FFN
             if isinstance(module, torch.nn.Sequential):
-                sub_cls = ' '.join([m.__class__.__name__.lower() for m in module])
+                sub_cls = ' '.join([m.__class__.__name__.lower()
+                                   for m in module])
                 if 'linear' in sub_cls and ('gelu' in sub_cls or 'relu' in sub_cls or 'silu' in sub_cls):
                     key = f"{lname}_ffn"
                     components[key] = module
 
     return components
-    
+
+
 def print_available_components(components: Dict[str, Callable]):
     """
     Print all available components in a formatted table.
@@ -296,7 +333,8 @@ def print_available_components(components: Dict[str, Callable]):
 
     # Sort components by layer index for better readability
     sorted_components = sorted(components.keys(), key=lambda x: (
-        int(x.split('_')[1]) if len(x.split('_')) > 1 and x.split('_')[1].isdigit() else 999,
+        int(x.split('_')[1]) if len(x.split('_')) > 1 and x.split(
+            '_')[1].isdigit() else 999,
         'attn' in x  # attention layers first
     ))
 
@@ -307,14 +345,15 @@ def print_available_components(components: Dict[str, Callable]):
             comp_type = 'FFN'
         else:
             comp_type = 'Unknown'
-    
+
         layer_idx = comp_name.split('_')[1] if '_' in comp_name else '-1'
-    
+
         print(f"{comp_name:<30} {comp_type:<15} {layer_idx:<15}")
 
     print(f"{'='*70}\n")
     print("Use --component-name to benchmark a specific component:")
-    print(f"  Example: python test_transformers_component_benchmark.py --component-name {sorted_components[0]}\n")
+    print(
+        f"  Example: python test_transformers_component_benchmark.py --component-name {sorted_components[0]}\n")
 
 
 def benchmark_component(
@@ -323,11 +362,11 @@ def benchmark_component(
     hidden_states: torch.Tensor,
     num_repeats: int = 10,
     warmup: int = 2,
-    model_config = None,
+    model_config=None,
 ) -> Dict[str, float]:
     """
     Benchmark a single component (attention or FFN layer).
-    
+
     Args:
         component: The module to benchmark
         component_name: Name of the component for logging
@@ -335,40 +374,72 @@ def benchmark_component(
         num_repeats: Number of timing iterations
         warmup: Number of warmup iterations
         model_config: Optional model config to get num_attention_heads, hidden_size, etc.
-    
+
     Returns:
         dict with keys: min_time_ms, max_time_ms, mean_time_ms, stdev_time_ms
     """
     times = []
+    cuda_times = []
 
-    def _make_defaults(bsz, seq_len, hidden_dim, dtype, device):
+    def _make_defaults(bsz, seq_len, hidden_dim, dtype, device, model_config):
         # bsz, seq_len, hidden_dim = hidden.shape
         # For RoPE (Qwen3, LLaMA): return (cos, sin) tuple
         # Standard RoPE: cos and sin have shape (1, seq_len, 1, head_dim)
         # Calculate head_dim from model config if available, otherwise estimate
-        if model_config is not None and hasattr(model_config, 'head_dim'):
-            head_dim = model_config.head_dim
-        elif model_config is not None and hasattr(model_config, 'num_attention_heads'):
-            num_heads = model_config.num_attention_heads
-            head_dim = hidden_dim // num_heads
-        else:
-            head_dim = hidden_dim // 8  # fallback estimate
+        num_heads = None
+        num_kv_heads = None
+        head_dim = None
+
+        if model_config is not None:
+            num_heads = getattr(model_config, 'num_attention_heads', None)
+            num_kv_heads = getattr(
+                model_config, 'num_key_value_heads', num_heads)
+            head_dim = getattr(model_config, 'head_dim', None)
+
+        if not num_heads or num_heads <= 0:
+            num_heads = 8
+        if not num_kv_heads or num_kv_heads <= 0:
+            num_kv_heads = num_heads
+        if head_dim is None or head_dim <= 0:
+            head_dim = max(hidden_dim // num_heads, 1)
 
         cos = torch.ones(1, seq_len, head_dim, dtype=dtype, device=device)
         sin = torch.zeros(1, seq_len, head_dim, dtype=dtype, device=device)
         pos_emb_rope = (cos, sin)
-        
+
         # Also provide a single tensor fallback for non-RoPE models
-        pos_emb_single = torch.zeros(bsz, seq_len, hidden_dim, dtype=dtype, device=device)
-        
+        pos_emb_single = torch.zeros(
+            bsz, seq_len, hidden_dim, dtype=dtype, device=device)
+
         # Generate proper 4D causal attention mask: (bsz, 1, seq_len, seq_len)
         # Causal mask has -inf (or very negative value) for future positions, 0 for valid positions
-        causal_mask = torch.triu(
-            torch.full((seq_len, seq_len), float('-inf'), dtype=dtype, device=device),
-            diagonal=1
+        past_seq_len = seq_len  # simulate cached prefix of same length
+        total_kv_len = seq_len + past_seq_len
+
+        mask_dtype = torch.float32 if dtype not in (
+            torch.float32, torch.float64) else dtype
+        causal_mask = torch.full(
+            (seq_len, total_kv_len),
+            torch.finfo(mask_dtype).min,
+            dtype=mask_dtype,
+            device=device,
         )
-        attn_mask = causal_mask.unsqueeze(0).unsqueeze(0).expand(bsz, 1, seq_len, seq_len)
-        return pos_emb_rope, pos_emb_single, attn_mask
+        row_ids = torch.arange(seq_len, device=device).unsqueeze(1)
+        col_ids = torch.arange(total_kv_len, device=device).unsqueeze(0)
+        valid = col_ids <= (past_seq_len + row_ids)
+        causal_mask = torch.where(valid, torch.zeros(
+            1, device=device, dtype=mask_dtype), causal_mask)
+        attn_mask = causal_mask.unsqueeze(0).unsqueeze(
+            0).expand(bsz, 1, seq_len, total_kv_len)
+        attn_mask = attn_mask.to(dtype)
+
+        past_key = torch.zeros(
+            bsz, num_kv_heads, past_seq_len, head_dim, dtype=dtype, device=device
+        )
+        past_value = torch.zeros_like(past_key)
+
+        past_key_values = BenchmarkCache(past_key, past_value)
+        return pos_emb_rope, pos_emb_single, attn_mask, past_key_values
 
     def invoke_component(module: torch.nn.Module, hidden: torch.Tensor):
         """Call the module with sensible defaults depending on its signature.
@@ -386,7 +457,9 @@ def benchmark_component(
                 sig = None
 
         bsz, seq_len, hidden_dim = hidden.shape
-        pos_emb_rope, pos_emb_single, attn_mask = _make_defaults(bsz, seq_len, hidden_dim, hidden.dtype, hidden.device)
+        pos_emb_rope, pos_emb_single, attn_mask, past_key_values = _make_defaults(
+            bsz, seq_len, hidden_dim, hidden.dtype, hidden.device, model_config
+        )
 
         # Log main tensor shapes for debugging (q/k/v projections, pos embeddings, masks)
         # try:
@@ -417,7 +490,11 @@ def benchmark_component(
 
             # Some modules accept past_key_values; pass None
             if 'past_key_values' in params:
-                kwargs['past_key_values'] = None
+                kwargs['past_key_values'] = past_key_values
+            if 'past_key_value' in params:
+                kwargs['past_key_value'] = past_key_values
+            if 'use_cache' in params:
+                kwargs['use_cache'] = True
 
             try:
                 return module(*args, **kwargs)
@@ -475,20 +552,30 @@ def benchmark_component(
     # Actual measurements
     with torch.no_grad():
         for _ in range(num_repeats):
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
             start = time.perf_counter()
+            start_event.record()
             _ = invoke_component(component, hidden_states)
+            end_event.record()
             torch.cuda.synchronize()
             end = time.perf_counter()
             times.append((end - start) * 1000)  # Convert to ms
-    
+            cuda_times.append(start_event.elapsed_time(end_event))
+
     times = np.array(times)
-    
+
     return {
         'min_time_ms': float(np.min(times)),
         'max_time_ms': float(np.max(times)),
         'mean_time_ms': float(np.mean(times)),
         'median_time_ms': float(np.median(times)),
         'stdev_time_ms': float(np.std(times)),
+        'cuda_mean_time_ms': float(np.mean(cuda_times)),
+        'cuda_median_time_ms': float(np.median(cuda_times)),
+        'cuda_stdev_time_ms': float(np.std(cuda_times)),
+        'cuda_max_time_ms': float(np.max(cuda_times)),
+        'cuda_min_time_ms': float(np.min(cuda_times)),
     }
 
 
@@ -499,9 +586,9 @@ def benchmark_components_with_green_ctx(args):
     np.random.seed(42)
     torch.manual_seed(42)
     os.makedirs(args.log_dir, exist_ok=True)
-    
+
     dev = torch.device("cuda:0")
-    
+
     # Generate output filename with component name if specified
     if args.component_name:
         # Insert component name into filename
@@ -509,9 +596,10 @@ def benchmark_components_with_green_ctx(args):
         output_filename = f"{base_name}_{args.component_name}{ext}"
     else:
         output_filename = args.log_path
-    
+
     output_path = os.path.join(args.log_dir, output_filename)
     df_header = pd.DataFrame(columns=[
+        "stream_idx",
         "sm_partition_count",
         "sm_count",
         "batch_size",
@@ -524,14 +612,19 @@ def benchmark_components_with_green_ctx(args):
         "mean_time_ms",
         "median_time_ms",
         "stdev_time_ms",
+        "cuda_max_time_ms",
+        "cuda_min_time_ms",
+        "cuda_mean_time_ms",
+        "cuda_median_time_ms",
+        "cuda_stdev_time_ms",
     ])
     df_header.to_csv(output_path, index=False)
-    
+
     print(f"Output will be saved to: {output_filename}")
-    
+
     # Load model and tokenizer once
     print(f"Loading model from {args.model}...")
-    
+
     # Try to use local modeling_qwen3_2 if available and model path matches Qwen3
     model = None
     if local_qwen is not None and 'qwen3' in args.model.lower():
@@ -542,14 +635,16 @@ def benchmark_components_with_green_ctx(args):
                 device_map="cuda:0",
                 trust_remote_code=True,
                 dtype=torch.bfloat16,
+                use_cache=True,
             )
             model.eval()
 
             local_qwen.set_debug_shapes(args.debug_shapes)
         except Exception as e:
-            print(f"Failed to load with local modeling_qwen3_2: {e}, falling back to AutoModel")
+            print(
+                f"Failed to load with local modeling_qwen3_2: {e}, falling back to AutoModel")
             model = None
-    
+
     # Fallback to AutoModel if local loading failed or not applicable
     if model is None:
         model_kwargs = {
@@ -563,25 +658,26 @@ def benchmark_components_with_green_ctx(args):
             **model_kwargs
         )
         model.eval()
-    
+
     # Load tokenizer if available (used to produce realistic input embeddings)
     try:
-        tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model, trust_remote_code=True)
     except Exception:
         tokenizer = None
-    
+
     # Get model config
     if hasattr(model, 'config'):
         hidden_dim = model.config.hidden_size
         print(f"Model hidden dimension: {hidden_dim}")
     else:
         hidden_dim = None
-    
+
     # Extract components
     components = extract_attention_and_ffn_layers(model)
     print(f"Found {len(components)} components (attention + FFN layers)")
     # print_available_components(components)
-    
+
     # Filter components if component_name is specified
     if args.component_name:
         if args.component_name not in components:
@@ -590,30 +686,31 @@ def benchmark_components_with_green_ctx(args):
             return
         components = {args.component_name: components[args.component_name]}
         print(f"Benchmarking only component: {args.component_name}")
-    
+
     # Test different SM partition sizes
     sm_partition_sizes = args.sm_partition_sizes
-    
+
     for partition_idx, sm_size in enumerate(sm_partition_sizes):
         try:
             print(f"\n{'='*70}")
             print(f"Testing SM partition size: {sm_size}")
             print(f"{'='*70}")
-            
+
             # Split GPU resources
             streams, resources = split_device_green_ctx(dev, 1, sm_size)
             sm_counts = [r.sm.smCount for r in resources]
             print(f"SM counts: {sm_counts}")
-            
+
             main_stream = streams[0]
             main_sm_count = sm_counts[0]
-            
+
             with torch.cuda.stream(main_stream):
                 # Test different batch sizes and sequence lengths
                 for batch_size in args.batch_sizes:
                     for seq_length in args.seq_lengths:
-                        print(f"\n  Batch size: {batch_size}, Seq length: {seq_length}")
-                        
+                        print(
+                            f"\n  Batch size: {batch_size}, Seq length: {seq_length}")
+
                         # Create hidden states by tokenizing and using model embeddings when possible
                         # Shape: (batch_size, seq_length, hidden_dim)
                         if tokenizer is not None:
@@ -631,7 +728,7 @@ def benchmark_components_with_green_ctx(args):
                                 dtype=torch.bfloat16,
                                 device=dev
                             )
-                        
+
                         # Benchmark each component
                         for component_name, component in components.items():
                             # Extract layer type (attn or ffn) and index
@@ -641,9 +738,10 @@ def benchmark_components_with_green_ctx(args):
                                 comp_type = 'ffn'
                             else:
                                 comp_type = 'unknown'
-                            
-                            layer_idx = component_name.split('_')[1] if '_' in component_name else '-1'
-                            
+
+                            layer_idx = component_name.split(
+                                '_')[1] if '_' in component_name else '-1'
+
                             try:
                                 # Benchmark the component
                                 timings = benchmark_component(
@@ -652,11 +750,13 @@ def benchmark_components_with_green_ctx(args):
                                     hidden_states,
                                     num_repeats=args.num_repeat,
                                     warmup=args.warmup,
-                                    model_config=model.config if hasattr(model, 'config') else None,
+                                    model_config=model.config if hasattr(
+                                        model, 'config') else None,
                                 )
-                                
+
                                 # Log result
                                 result_row = pd.DataFrame([{
+                                    "stream_idx": 0,
                                     "sm_partition_count": sm_size,
                                     "sm_count": main_sm_count,
                                     "batch_size": batch_size,
@@ -669,30 +769,41 @@ def benchmark_components_with_green_ctx(args):
                                     "mean_time_ms": timings['mean_time_ms'],
                                     "median_time_ms": timings['median_time_ms'],
                                     "stdev_time_ms": timings['stdev_time_ms'],
+                                    "cuda_mean_time_ms": timings['cuda_mean_time_ms'],
+                                    "cuda_median_time_ms": timings['cuda_median_time_ms'],
+                                    "cuda_stdev_time_ms": timings['cuda_stdev_time_ms'],
+                                    "cuda_max_time_ms": timings['cuda_max_time_ms'],
+                                    "cuda_min_time_ms": timings['cuda_min_time_ms'],
                                 }])
-                                result_row.to_csv(output_path, mode='a', header=False, index=False)
-                                
+                                result_row.to_csv(
+                                    output_path, mode='a', header=False, index=False)
+
                                 print(f"    {component_name}: mean={timings['mean_time_ms']:.4f}ms, "
                                       f"median={timings['median_time_ms']:.4f}ms, "
-                                      f"stdev={timings['stdev_time_ms']:.4f}ms")
-                            
+                                      f"stdev={timings['stdev_time_ms']:.4f}ms, "
+                                      f"cuda_mean={timings['cuda_mean_time_ms']:.4f}ms, "
+                                      f"cuda_median={timings['cuda_median_time_ms']:.4f}ms, "
+                                      f"cuda_stdev={timings['cuda_stdev_time_ms']:.4f}ms, "
+                                      f"cuda_max={timings['cuda_max_time_ms']:.4f}ms, "
+                                      f"cuda_min={timings['cuda_min_time_ms']:.4f}ms")
+
                             except Exception as e:
                                 print(f"    {component_name}: Error - {e}")
                                 # print backtrace
                                 import traceback
 
                                 traceback.print_exc()
-                
+
                 # Clean up per-partition temporary tensors
                 torch.cuda.empty_cache()
                 cleanup()
                 torch.cuda.synchronize()
-        
+
         except RuntimeError as e:
             print(f"Error with SM partition size {sm_size}: {e}")
             import traceback
             traceback.print_exc()
-    
+
     # Final cleanup: delete model once after all partitions
     try:
         del model
@@ -710,55 +821,59 @@ def create_comparison_plot(csv_path, output_dir=None):
     """Create visualization of component performance."""
     import matplotlib.pyplot as plt
     import seaborn as sns
-    
+
     if output_dir is None:
         output_dir = os.path.dirname(csv_path)
-    
+
     df = pd.read_csv(csv_path)
-    
+
     # Set style
     sns.set_style("whitegrid")
     plt.rcParams['figure.figsize'] = (16, 12)
-    
+
     # Create subplots
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    
+
     # Plot 1: Attention vs FFN latency by batch size
     ax1 = axes[0, 0]
     for comp_type in df['component_type'].unique():
         data = df[df['component_type'] == comp_type]
         data_grouped = data.groupby('batch_size')['mean_time_ms'].mean()
-        ax1.plot(data_grouped.index, data_grouped.values, marker='o', label=comp_type.upper())
+        ax1.plot(data_grouped.index, data_grouped.values,
+                 marker='o', label=comp_type.upper())
     ax1.set_xlabel('Batch Size')
     ax1.set_ylabel('Latency (ms)')
     ax1.set_title('Component Latency vs Batch Size')
     ax1.legend()
     ax1.grid(True)
-    
+
     # Plot 2: Latency vs SM partition count
     ax2 = axes[0, 1]
     for comp_type in df['component_type'].unique():
         data = df[df['component_type'] == comp_type]
-        data_grouped = data.groupby('sm_partition_count')['mean_time_ms'].mean()
-        ax2.plot(data_grouped.index, data_grouped.values, marker='s', label=comp_type.upper())
+        data_grouped = data.groupby('sm_partition_count')[
+            'mean_time_ms'].mean()
+        ax2.plot(data_grouped.index, data_grouped.values,
+                 marker='s', label=comp_type.upper())
     ax2.set_xlabel('SM Partition Count')
     ax2.set_ylabel('Latency (ms)')
     ax2.set_title('Component Latency vs GPU Partition Size')
     ax2.legend()
     ax2.grid(True)
-    
+
     # Plot 3: Latency vs sequence length
     ax3 = axes[1, 0]
     for comp_type in df['component_type'].unique():
         data = df[df['component_type'] == comp_type]
         data_grouped = data.groupby('seq_length')['mean_time_ms'].mean()
-        ax3.plot(data_grouped.index, data_grouped.values, marker='^', label=comp_type.upper())
+        ax3.plot(data_grouped.index, data_grouped.values,
+                 marker='^', label=comp_type.upper())
     ax3.set_xlabel('Sequence Length')
     ax3.set_ylabel('Latency (ms)')
     ax3.set_title('Component Latency vs Sequence Length')
     ax3.legend()
     ax3.grid(True)
-    
+
     # Plot 4: Heatmap of attention latency by batch and seq length
     ax4 = axes[1, 1]
     attn_data = df[df['component_type'] == 'attention']
@@ -769,12 +884,14 @@ def create_comparison_plot(csv_path, output_dir=None):
             columns='seq_length',
             aggfunc='mean'
         )
-        sns.heatmap(pivot_data, annot=True, fmt='.2f', cmap='YlOrRd', ax=ax4, 
+        sns.heatmap(pivot_data, annot=True, fmt='.2f', cmap='YlOrRd', ax=ax4,
                     cbar_kws={'label': 'Latency (ms)'})
-        ax4.set_title('Attention Latency Heatmap: Batch Size vs Sequence Length')
-    
+        ax4.set_title(
+            'Attention Latency Heatmap: Batch Size vs Sequence Length')
+
     plt.tight_layout()
-    output_file = os.path.join(output_dir, 'transformers_component_comparison.png')
+    output_file = os.path.join(
+        output_dir, 'transformers_component_comparison.png')
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
     print(f"Comparison plot saved to: {output_file}")
     plt.close()
@@ -801,7 +918,7 @@ def main():
                         help='Number of warmup iterations')
     parser.add_argument('--log-dir', type=str, default='profile_transformers_component',
                         help='Output directory for logs')
-    parser.add_argument('--log-path', type=str, 
+    parser.add_argument('--log-path', type=str,
                         default='transformers_component_benchmark.csv',
                         help='Output CSV filename')
     parser.add_argument('--plot', action='store_true',
@@ -811,11 +928,11 @@ def main():
                         help='Preferred attention implementation')
     parser.add_argument('--dump-modules', action='store_true',
                         help='Dump model.named_modules() to a file (useful for debugging component discovery)')
-    
+
     parser.add_argument('--debug-shapes', action='store_true',
                         help='Enable debug shapes for local Qwen model (if applicable)')
     args = parser.parse_args()
-    
+
     print("="*70)
     print("Transformers Component Benchmark (Attention & FFN Layers)")
     print("="*70)
@@ -829,7 +946,7 @@ def main():
     print(f"SM partition sizes: {args.sm_partition_sizes}")
     print(f"Attention implementation: {args.attention_impl}")
     print("="*70)
-    
+
     # Run benchmark
     # If requested, dump the model.named_modules() for debugging and exit
     if args.dump_modules:
@@ -851,7 +968,7 @@ def main():
         return
 
     benchmark_components_with_green_ctx(args)
-    
+
     # Generate plots if requested
     if args.plot:
         output_path = os.path.join(args.log_dir, args.log_path)

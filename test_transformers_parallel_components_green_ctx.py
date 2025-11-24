@@ -24,7 +24,7 @@ import os
 import sys
 import threading
 import time
-from typing import List, Tuple, Dict, Callable
+from typing import List, Tuple, Dict, Callable, Optional
 from random import randint
 from pathlib import Path
 
@@ -46,6 +46,34 @@ try:
     import modeling_qwen3_2 as local_qwen
 except ImportError:
     local_qwen = None
+
+
+class BenchmarkCache:
+    """Minimal cache object implementing the update API expected by HF attention layers."""
+
+    def __init__(self, past_key: Optional[torch.Tensor], past_value: Optional[torch.Tensor]):
+        self.past_key = past_key
+        self.past_value = past_value
+
+    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+        if self.past_key is not None and self.past_value is not None:
+            key_states = torch.cat([self.past_key, key_states], dim=2)
+            value_states = torch.cat([self.past_value, value_states], dim=2)
+        return key_states, value_states
+
+    def __iter__(self):
+        yield self.past_key
+        yield self.past_value
+
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, idx):
+        if idx == 0:
+            return self.past_key
+        if idx == 1:
+            return self.past_value
+        raise IndexError(idx)
 
 
 def get_embeddings_from_token_ids(
@@ -78,18 +106,21 @@ def get_embeddings_from_token_ids(
             input_ids = input_ids.repeat(batch_size, 1)
         elif input_ids.size(0) != batch_size:
             # repeat or truncate to match batch_size
-            input_ids = input_ids.repeat(batch_size // input_ids.size(0) + 1, 1)[:batch_size]
+            input_ids = input_ids.repeat(
+                batch_size // input_ids.size(0) + 1, 1)[:batch_size]
     else:
         # try to determine vocab size
         vocab_size = getattr(tokenizer, "vocab_size", None)
         if vocab_size is None:
             try:
-                vocab_size = tokenizer.model_maximum_features if hasattr(tokenizer, 'model_maximum_features') else None
+                vocab_size = tokenizer.model_maximum_features if hasattr(
+                    tokenizer, 'model_maximum_features') else None
             except Exception:
                 vocab_size = None
         if not vocab_size or vocab_size <= 0:
             vocab_size = 50257
-        input_ids = torch.randint(0, vocab_size, (batch_size, seq_length), device=device)
+        input_ids = torch.randint(
+            0, vocab_size, (batch_size, seq_length), device=device)
 
     # Get embedding layer
     emb_layer = None
@@ -101,10 +132,12 @@ def get_embeddings_from_token_ids(
         emb_layer = model.model.embed_tokens
 
     if emb_layer is None:
-        raise RuntimeError("Embedding layer not found on model; cannot produce input embeddings")
+        raise RuntimeError(
+            "Embedding layer not found on model; cannot produce input embeddings")
 
     # Ensure input_ids on same device as embedding layer
-    input_ids = input_ids.to(next(emb_layer.parameters()).device if any(True for _ in emb_layer.parameters()) else device)
+    input_ids = input_ids.to(next(emb_layer.parameters()).device if any(
+        True for _ in emb_layer.parameters()) else device)
 
     with torch.no_grad():
         embeddings = emb_layer(input_ids)
@@ -205,7 +238,7 @@ def split_device_green_ctx(
 ) -> Tuple[List[torch.Stream], List[CUdevResource]]:
     """
     Split the device into multiple green contexts.
-    
+
     Returns:
         streams: List of torch.Streams for each group (including remaining)
         resources: List of CUdevResource for each group (including remaining)
@@ -266,7 +299,8 @@ def extract_attention_and_ffn_layers(model) -> Dict[str, Callable]:
 
             # Heuristics for attention modules: class name contains 'Attention' or module has q/k/v proj
             cls_name = module.__class__.__name__.lower()
-            has_qkv = any(hasattr(module, attr) for attr in ('q_proj', 'k_proj', 'v_proj', 'qkv_proj', 'q', 'k', 'v'))
+            has_qkv = any(hasattr(module, attr) for attr in (
+                'q_proj', 'k_proj', 'v_proj', 'qkv_proj', 'q', 'k', 'v'))
             if 'attention' in cls_name or 'selfattn' in cls_name or 'multihead' in cls_name or has_qkv:
                 key = f"{lname}_attn"
                 components[key] = module
@@ -280,7 +314,8 @@ def extract_attention_and_ffn_layers(model) -> Dict[str, Callable]:
 
             # Detect sequential blocks with Linear layers -> potential FFN
             if isinstance(module, torch.nn.Sequential):
-                sub_cls = ' '.join([m.__class__.__name__.lower() for m in module])
+                sub_cls = ' '.join([m.__class__.__name__.lower()
+                                   for m in module])
                 if 'linear' in sub_cls and ('gelu' in sub_cls or 'relu' in sub_cls or 'silu' in sub_cls):
                     key = f"{lname}_ffn"
                     components[key] = module
@@ -304,7 +339,8 @@ def print_available_components(components: Dict[str, Callable]):
 
     # Sort components by layer index for better readability
     sorted_components = sorted(components.keys(), key=lambda x: (
-        int(x.split('_')[1]) if len(x.split('_')) > 1 and x.split('_')[1].isdigit() else 999,
+        int(x.split('_')[1]) if len(x.split('_')) > 1 and x.split(
+            '_')[1].isdigit() else 999,
         'attn' in x  # attention layers first
     ))
 
@@ -315,9 +351,9 @@ def print_available_components(components: Dict[str, Callable]):
             comp_type = 'FFN'
         else:
             comp_type = 'Unknown'
-    
+
         layer_idx = comp_name.split('_')[1] if '_' in comp_name else '-1'
-    
+
         print(f"{comp_name:<30} {comp_type:<15} {layer_idx:<15}")
 
     print(f"{'='*70}\n")
@@ -339,84 +375,162 @@ def invoke_component(module: torch.nn.Module, hidden: torch.Tensor, model_config
             sig = None
 
     bsz, seq_len, hidden_dim = hidden.shape
-    
-    # Generate default auxiliary tensors (RoPE position embeddings, attention mask)
-    if model_config is not None and hasattr(model_config, 'head_dim'):
-            head_dim = model_config.head_dim
-    elif model_config is not None and hasattr(model_config, 'num_attention_heads'):
-        num_heads = model_config.num_attention_heads
-        head_dim = hidden_dim // num_heads
-    else:
-        head_dim = hidden_dim // 8  # fallback estimate
 
-    cos = torch.ones(1, seq_len, head_dim, dtype=hidden.dtype, device=hidden.device)
-    sin = torch.zeros(1, seq_len, head_dim, dtype=hidden.dtype, device=hidden.device)
-    pos_emb_rope = (cos, sin)
-    
-    pos_emb_single = torch.zeros(bsz, seq_len, hidden_dim, dtype=hidden.dtype, device=hidden.device)
-    
-    # Generate proper 4D causal attention mask: (bsz, 1, seq_len, seq_len)
-    # Causal mask has -inf (or very negative value) for future positions, 0 for valid positions
-    causal_mask = torch.triu(
-        torch.full((seq_len, seq_len), float('-inf'), dtype=hidden.dtype, device=hidden.device),
-        diagonal=1
+    def _make_defaults(bsz, seq_len, hidden_dim, dtype, device, config):
+        num_heads = getattr(config, 'num_attention_heads',
+                            8) if config is not None else 8
+        num_kv_heads = getattr(config, 'num_key_value_heads',
+                               num_heads) if config is not None else num_heads
+        head_dim = getattr(config, 'head_dim', None)
+        if not head_dim:
+            head_dim = max(hidden_dim // num_heads, 1)
+
+        cos = torch.ones(1, seq_len, head_dim, dtype=dtype, device=device)
+        sin = torch.zeros(1, seq_len, head_dim, dtype=dtype, device=device)
+        pos_emb_rope = (cos, sin)
+
+        pos_emb_single = torch.zeros(
+            bsz, seq_len, hidden_dim, dtype=dtype, device=device)
+
+        past_seq_len = seq_len
+        total_kv_len = seq_len + past_seq_len
+        mask_dtype = torch.float32 if dtype not in (
+            torch.float32, torch.float64) else dtype
+        causal_mask = torch.full(
+            (seq_len, total_kv_len),
+            torch.finfo(mask_dtype).min,
+            dtype=mask_dtype,
+            device=device,
+        )
+        row_ids = torch.arange(seq_len, device=device).unsqueeze(1)
+        col_ids = torch.arange(total_kv_len, device=device).unsqueeze(0)
+        valid = col_ids <= (past_seq_len + row_ids)
+        causal_mask = torch.where(valid, torch.zeros(
+            1, device=device, dtype=mask_dtype), causal_mask)
+        attn_mask = causal_mask.unsqueeze(0).unsqueeze(
+            0).expand(bsz, 1, seq_len, total_kv_len).to(dtype)
+
+        past_key = torch.zeros(
+            bsz, num_kv_heads, past_seq_len, head_dim, dtype=dtype, device=device)
+        past_value = torch.zeros_like(past_key)
+        cache = BenchmarkCache(past_key, past_value)
+        return pos_emb_rope, pos_emb_single, attn_mask, cache
+
+    pos_emb_rope, pos_emb_single, attn_mask, past_key_values = _make_defaults(
+        bsz, seq_len, hidden_dim, hidden.dtype, hidden.device, model_config
     )
-    attn_mask = causal_mask.unsqueeze(0).unsqueeze(0).expand(bsz, 1, seq_len, seq_len)
 
     # Build kwargs based on parameter names when possible
     if sig is not None:
         params = list(sig.parameters.keys())
         kwargs = {}
         args = []
-        
-        if 'hidden_states' in params or 'x' in params or 'input' in params:
+
+        # Determine if this is likely an attention or FFN module
+        # Attention modules typically have position_embeddings and attention_mask
+        # FFN modules typically only have x/hidden_states
+        is_likely_attention = 'position_embeddings' in params or 'attention_mask' in params
+        is_likely_ffn = ('x' in params and len([p for p in params if p not in ['self', 'x']]) == 0) or \
+            ('mlp' in module.__class__.__name__.lower()
+             or 'ffn' in module.__class__.__name__.lower())
+
+        # For FFN modules, use simpler calling pattern
+        if is_likely_ffn and not is_likely_attention:
+            # FFN typically only needs the input tensor
+            if 'x' in params:
+                return module(hidden)
+            elif 'hidden_states' in params:
+                return module(hidden_states=hidden)
+            elif 'input' in params:
+                return module(input=hidden)
+            else:
+                # Fallback: try positional
+                return module(hidden)
+
+        # For attention modules, build proper arguments
+        if 'hidden_states' in params:
+            args.append(hidden)
+        elif 'x' in params:
+            args.append(hidden)
+        elif 'input' in params:
             args.append(hidden)
 
+        # Use keyword arguments for optional parameters to avoid ordering issues
         if 'position_embeddings' in params:
-            args.append(pos_emb_rope)
+            # Check if it's a keyword-only parameter
+            param_obj = sig.parameters['position_embeddings']
+            if param_obj.kind == inspect.Parameter.KEYWORD_ONLY:
+                kwargs['position_embeddings'] = pos_emb_rope
+            else:
+                args.append(pos_emb_rope)
 
         if 'attention_mask' in params:
-            args.append(attn_mask)
+            param_obj = sig.parameters['attention_mask']
+            if param_obj.kind == inspect.Parameter.KEYWORD_ONLY:
+                kwargs['attention_mask'] = attn_mask
+            else:
+                args.append(attn_mask)
 
         if 'return_dict' in params:
             kwargs['return_dict'] = False
 
         if 'past_key_values' in params:
-            kwargs['past_key_values'] = None
+            kwargs['past_key_values'] = past_key_values
+        if 'past_key_value' in params:
+            kwargs['past_key_value'] = past_key_values
+        if 'use_cache' in params:
+            kwargs['use_cache'] = True
+        if 'cache_position' in params:
+            # Create cache_position if needed
+            cache_position = torch.arange(
+                seq_len, device=hidden.device, dtype=torch.long)
+            kwargs['cache_position'] = cache_position
 
         try:
             return module(*args, **kwargs)
         except (TypeError, ValueError) as e:
             # If RoPE failed (unpacking error), try with single tensor
             if 'position_embeddings' in params and ('unpack' in str(e).lower() or 'tuple' in str(e).lower()):
-                args_fallback = []
-                if 'hidden_states' in params or 'x' in params or 'input' in params:
-                    args_fallback.append(hidden)
-                if 'position_embeddings' in params:
-                    args_fallback.append(pos_emb_single)
-                if 'attention_mask' in params:
-                    args_fallback.append(attn_mask)
+                kwargs_fallback = kwargs.copy()
+                if 'position_embeddings' in kwargs_fallback:
+                    kwargs_fallback['position_embeddings'] = pos_emb_single
+                elif 'position_embeddings' in params:
+                    # Remove from args and add to kwargs
+                    args_fallback = [
+                        a for a in args if not isinstance(a, tuple)]
+                    kwargs_fallback['position_embeddings'] = pos_emb_single
                 try:
-                    return module(*args_fallback, **kwargs)
+                    return module(*args_fallback, **kwargs_fallback)
                 except (TypeError, ValueError):
                     pass
             pass
 
-    # Try common call patterns with RoPE
+    # Fallback: Try common call patterns
+    # For attention modules
     try:
         return module(hidden, pos_emb_rope, attn_mask)
     except (TypeError, ValueError):
         pass
 
     try:
-        return module(hidden, attention_mask=attn_mask)
+        return module(hidden, position_embeddings=pos_emb_rope, attention_mask=attn_mask)
+    except (TypeError, ValueError):
+        pass
+
+    # For FFN modules or simple cases
+    try:
+        return module(hidden)
     except (TypeError, ValueError):
         pass
 
     try:
-        return module(hidden)
-    except Exception as e:
-        raise
+        return module(x=hidden)
+    except (TypeError, ValueError):
+        pass
+
+    # Last resort
+    raise RuntimeError(
+        f"Failed to invoke module {module.__class__.__name__} with any known calling pattern")
 
 
 def worker_run_components_on_stream(
@@ -424,6 +538,7 @@ def worker_run_components_on_stream(
     stream_idx: int,
     stream: torch.cuda.Stream,
     sm_count: int,
+    sm_partition_count: int,
     batch_sizes: List[int],
     seq_lengths: List[int],
     hidden_dim: int,
@@ -440,7 +555,7 @@ def worker_run_components_on_stream(
 ):
     """
     Worker thread that runs components on a dedicated green context stream.
-    
+
     Each worker:
     - Uses a specific stream with allocated SMs
     - Runs all components sequentially on that stream
@@ -449,7 +564,8 @@ def worker_run_components_on_stream(
     """
     try:
         print(f"[worker {stream_idx}] starting on stream with {sm_count} SMs")
-        print(f"[worker {stream_idx}] batch_sizes={batch_sizes}, seq_lengths={seq_lengths}, hidden_dim={hidden_dim}")
+        print(
+            f"[worker {stream_idx}] batch_sizes={batch_sizes}, seq_lengths={seq_lengths}, hidden_dim={hidden_dim}")
 
         with torch.cuda.stream(stream):
             # Prepare warmup on the first batch/seq combination
@@ -477,25 +593,42 @@ def worker_run_components_on_stream(
                 for comp_name, component in list(components.items())[:1]:
                     for _ in range(warmup):
                         try:
-                            _ = invoke_component(component, hidden_states, model_config)
+                            _ = invoke_component(
+                                component, hidden_states, model_config)
                         except Exception as e:
-                            print(f"[worker {stream_idx}] warmup error on {comp_name}: {e}")
+                            print(
+                                f"[worker {stream_idx}] warmup error on {comp_name}: {e}")
 
             torch.cuda.synchronize()
 
             # Synchronize all workers before benchmark starts
             if barrier is not None:
                 try:
-                    print(f"[worker {stream_idx}] waiting at barrier before benchmark")
+                    print(
+                        f"[worker {stream_idx}] waiting at barrier before benchmark")
                     barrier.wait()
-                    print(f"[worker {stream_idx}] barrier released, starting benchmark")
+                    print(
+                        f"[worker {stream_idx}] barrier released, starting benchmark")
                 except Exception as e:
-                    print(f"[worker {stream_idx}] barrier error (may indicate worker crash): {e}")
+                    print(
+                        f"[worker {stream_idx}] barrier error (may indicate worker crash): {e}")
                     raise
 
             # Iterate over batch sizes and sequence lengths
             for batch_size in batch_sizes:
                 for seq_length in seq_lengths:
+                    # Synchronize all workers before starting this batch_size/seq_length combination
+                    if barrier is not None:
+                        try:
+                            print(
+                                f"[worker {stream_idx}] waiting at barrier before (bs={batch_size}, seqlen={seq_length})")
+                            barrier.wait()
+                            print(
+                                f"[worker {stream_idx}] barrier released, starting (bs={batch_size}, seqlen={seq_length})")
+                        except Exception as e:
+                            print(f"[worker {stream_idx}] barrier error: {e}")
+                            raise
+
                     # Create input hidden states for this combination
                     if tokenizer is not None:
                         hidden_states = get_embeddings_from_token_ids(
@@ -516,24 +649,47 @@ def worker_run_components_on_stream(
                     # Benchmark each component on this stream
                     for comp_name, component in components.items():
                         times = []
+                        cuda_times = []
 
-                        print(f"[worker {stream_idx}] benchmarking {comp_name} (bs={batch_size}, seqlen={seq_length})")
+                        print(
+                            f"[worker {stream_idx}] benchmarking {comp_name} (bs={batch_size}, seqlen={seq_length})")
 
                         with torch.no_grad():
                             for repeat_idx in range(num_repeats):
+                                start_event = torch.cuda.Event(
+                                    enable_timing=True)
+                                end_event = torch.cuda.Event(
+                                    enable_timing=True)
                                 start = time.perf_counter()
+                                start_event.record()
                                 try:
-                                    _ = invoke_component(component, hidden_states, model_config)
+                                    _ = invoke_component(
+                                        component, hidden_states, model_config)
                                 except Exception as e:
-                                    print(f"[worker {stream_idx}] component {comp_name} error: {e}")
+                                    print(
+                                        f"[worker {stream_idx}] component {comp_name} error: {e}")
                                     import traceback
                                     traceback.print_exc()
                                     raise
+                                end_event.record()
                                 torch.cuda.synchronize()
                                 end = time.perf_counter()
                                 times.append((end - start) * 1000)
+                                cuda_times.append(
+                                    start_event.elapsed_time(end_event))
 
                         times = np.array(times)
+                        cuda_times = np.array(cuda_times)
+
+                        # Synchronize all workers after completing this component test
+                        # This ensures all streams finish the same test before writing results
+                        if barrier is not None:
+                            try:
+                                barrier.wait()
+                            except Exception as e:
+                                print(
+                                    f"[worker {stream_idx}] barrier error after component test: {e}")
+                                raise
 
                         # Extract component type and layer index
                         if 'attn' in comp_name:
@@ -543,27 +699,34 @@ def worker_run_components_on_stream(
                         else:
                             comp_type = 'unknown'
 
-                        layer_idx = comp_name.split('_')[1] if '_' in comp_name else '-1'
+                        layer_idx = comp_name.split(
+                            '_')[1] if '_' in comp_name else '-1'
 
                         # Record result
                         result_row = {
                             "stream_idx": stream_idx,
+                            "sm_partition_count": sm_partition_count,
                             "sm_count": sm_count,
-                            "component_name": comp_name,
-                            "component_type": comp_type,
-                            "layer_idx": layer_idx,
                             "batch_size": batch_size,
                             "seq_length": seq_length,
+                            "component_type": comp_type,
+                            "layer_idx": layer_idx,
                             "hidden_dim": hidden_dim,
                             "min_time_ms": float(np.min(times)),
                             "max_time_ms": float(np.max(times)),
                             "mean_time_ms": float(np.mean(times)),
                             "median_time_ms": float(np.median(times)),
                             "stdev_time_ms": float(np.std(times)),
+                            "cuda_max_time_ms": float(np.max(cuda_times)),
+                            "cuda_min_time_ms": float(np.min(cuda_times)),
+                            "cuda_mean_time_ms": float(np.mean(cuda_times)),
+                            "cuda_median_time_ms": float(np.median(cuda_times)),
+                            "cuda_stdev_time_ms": float(np.std(cuda_times)),
                         }
 
                         with lock:
-                            pd.DataFrame([result_row]).to_csv(output_path, mode='a', header=False, index=False)
+                            pd.DataFrame([result_row]).to_csv(
+                                output_path, mode='a', header=False, index=False)
                             results.append(result_row)
 
                         print(
@@ -576,7 +739,7 @@ def worker_run_components_on_stream(
             cleanup()
             torch.cuda.synchronize()
             print(f"[worker {stream_idx}] finished")
-    
+
     except Exception as e:
         print(f"[worker {stream_idx}] error: {e}")
         import traceback
@@ -584,7 +747,8 @@ def worker_run_components_on_stream(
         # Try to release barrier even if error occurred
         if barrier is not None:
             try:
-                print(f"[worker {stream_idx}] attempting to release barrier after error")
+                print(
+                    f"[worker {stream_idx}] attempting to release barrier after error")
                 barrier.abort()
             except Exception:
                 pass
@@ -597,35 +761,40 @@ def benchmark_parallel_components_green_ctx(args):
     np.random.seed(42)
     torch.manual_seed(42)
     os.makedirs(args.log_dir, exist_ok=True)
-    
+
     dev = torch.device("cuda:0")
-    
+
     # Create output CSV
     output_path = os.path.join(args.log_dir, args.log_path)
     df_header = pd.DataFrame(columns=[
         "stream_idx",
+        "sm_partition_count",
         "sm_count",
-        "component_name",
-        "component_type",
-        "layer_idx",
         "batch_size",
         "seq_length",
+        "component_type",
+        "layer_idx",
         "hidden_dim",
         "min_time_ms",
         "max_time_ms",
         "mean_time_ms",
         "median_time_ms",
         "stdev_time_ms",
+        "cuda_max_time_ms",
+        "cuda_min_time_ms",
+        "cuda_mean_time_ms",
+        "cuda_median_time_ms",
+        "cuda_stdev_time_ms",
     ])
     df_header.to_csv(output_path, index=False)
-    
+
     print(f"\n{'='*70}")
     print(f"Output will be saved to: {output_path}")
     print(f"{'='*70}")
-    
+
     # Load model and tokenizer
     print(f"\nLoading model from {args.model}...")
-    
+
     # Try to use local modeling_qwen3_2 if available and model path matches Qwen3
     model = None
     if local_qwen is not None and 'qwen3' in args.model.lower():
@@ -641,9 +810,10 @@ def benchmark_parallel_components_green_ctx(args):
             if hasattr(args, 'debug_shapes') and args.debug_shapes:
                 local_qwen.set_debug_shapes(True)
         except Exception as e:
-            print(f"Failed to load with local modeling_qwen3_2: {e}, falling back to AutoModel")
+            print(
+                f"Failed to load with local modeling_qwen3_2: {e}, falling back to AutoModel")
             model = None
-    
+
     # Fallback to AutoModel if local loading failed or not applicable
     if model is None:
         model_kwargs = {
@@ -657,25 +827,26 @@ def benchmark_parallel_components_green_ctx(args):
             **model_kwargs
         )
         model.eval()
-    
+
     # Load tokenizer if available
     try:
-        tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model, trust_remote_code=True)
     except Exception:
         tokenizer = None
-    
+
     # Get model config
     if hasattr(model, 'config'):
         hidden_dim = model.config.hidden_size
         print(f"Model hidden dimension: {hidden_dim}")
     else:
         hidden_dim = None
-    
+
     # Extract components
     components = extract_attention_and_ffn_layers(model)
     print(f"Found {len(components)} components (attention + FFN layers)")
     # print_available_components(components)
-    
+
     # Filter components if component_name is specified
     if args.component_name:
         if args.component_name not in components:
@@ -684,49 +855,54 @@ def benchmark_parallel_components_green_ctx(args):
             return
         components = {args.component_name: components[args.component_name]}
         print(f"Benchmarking only component: {args.component_name}")
-    
+
     # Create green context streams
     num_streams = args.num_streams
     min_sm_per_stream = args.min_sm_per_stream
-    
+
     print(f"\n{'='*70}")
-    print(f"Creating {num_streams} green context streams with min {min_sm_per_stream} SMs each")
+    print(
+        f"Creating {num_streams} green context streams with min {min_sm_per_stream} SMs each")
     print(f"{'='*70}\n")
-    
-    streams, resources = split_device_green_ctx(dev, num_streams, min_sm_per_stream)
-    
+
+    streams, resources = split_device_green_ctx(
+        dev, num_streams, min_sm_per_stream)
+
     # Get SM counts for each resource
     sm_counts = []
     for res in resources:
         try:
-            sm_count = res.sm.smCount if hasattr(res, 'sm') and hasattr(res.sm, 'smCount') else -1
+            sm_count = res.sm.smCount if hasattr(
+                res, 'sm') and hasattr(res.sm, 'smCount') else -1
         except Exception:
             sm_count = -1
         sm_counts.append(sm_count)
         print(f"Stream resource allocated: {sm_count} SMs")
-    
+
     print(f"streams number: {len(streams)}, SM counts: {sm_counts}\n")
-    
+
     # Shared results list and lock
     results = []
     results_lock = threading.Lock()
     threads = []
-    
+
     # Calculate actual number of streams (excluding leftover if requested)
     if args.no_leftover_mode:
         actual_num_streams = len(streams) - 1  # Don't use the remaining stream
         streams_to_use = streams[:-1]
         sm_counts_to_use = sm_counts[:-1]
     else:
-        actual_num_streams = len(streams)  # Use all streams including remaining
+        # Use all streams including remaining
+        actual_num_streams = len(streams)
         streams_to_use = streams
         sm_counts_to_use = sm_counts
-    
+
     # Create barrier for synchronizing all worker threads
     barrier = threading.Barrier(actual_num_streams)
-    
+
     # Launch worker threads for each stream
-    print(f"Launching {actual_num_streams} worker threads (one per stream)...\n")
+    print(
+        f"Launching {actual_num_streams} worker threads (one per stream)...\n")
     for stream_idx, (stream, sm_count) in enumerate(zip(streams_to_use, sm_counts_to_use)):
         t = threading.Thread(
             target=worker_run_components_on_stream,
@@ -735,6 +911,7 @@ def benchmark_parallel_components_green_ctx(args):
                 stream_idx,
                 stream,
                 sm_count,
+                actual_num_streams,  # sm_partition_count
                 args.batch_sizes,
                 args.seq_lengths,
                 hidden_dim,
@@ -753,20 +930,21 @@ def benchmark_parallel_components_green_ctx(args):
         )
         t.start()
         threads.append(t)
-    
+
     # Wait for all workers to finish
     print("Waiting for workers to finish...\n")
     for t in threads:
         t.join()
-    
+
     # Summary
     if results:
         print(f"\n{'='*70}")
-        print(f"Collected {len(results)} measurements (saved to {output_path})")
+        print(
+            f"Collected {len(results)} measurements (saved to {output_path})")
         print(f"{'='*70}\n")
     else:
         print("No results were collected.")
-    
+
     # Cleanup
     try:
         del model
@@ -801,7 +979,7 @@ def main():
                         help='Number of warmup iterations')
     parser.add_argument('--log-dir', type=str, default='parallel_components_green_ctx',
                         help='Output directory for logs')
-    parser.add_argument('--log-path', type=str, 
+    parser.add_argument('--log-path', type=str,
                         default='transformers_parallel_components.csv',
                         help='Output CSV filename')
     parser.add_argument('--attention-impl', type=str, default='eager',
@@ -811,15 +989,15 @@ def main():
                         help='Enable debug shapes for local Qwen model (if applicable)')
     parser.add_argument('--no-leftover-mode', default=False, action='store_true',
                         help='Do not include the leftover SM allocation (use only main splits)')
-    
+
     args = parser.parse_args()
-    
+
     # Backward compatibility for single-value flags
     if hasattr(args, 'batch_size') and args.batch_size is not None:
         args.batch_sizes = [args.batch_size]
     if hasattr(args, 'seq_length') and args.seq_length is not None:
         args.seq_lengths = [args.seq_length]
-    
+
     print("="*70)
     print("Parallel Transformers Component Benchmarking (Green Context Streams)")
     print("="*70)
@@ -835,7 +1013,7 @@ def main():
     print(f"Num repeats: {args.num_repeat}")
     print(f"Attention implementation: {args.attention_impl}")
     print("="*70)
-    
+
     benchmark_parallel_components_green_ctx(args)
 
 
