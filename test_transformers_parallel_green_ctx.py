@@ -140,7 +140,7 @@ def split_device_green_ctx(
 ) -> Tuple[List[torch.Stream], List[CUdevResource]]:
     """
     Split the device into multiple green contexts.
-    
+
     Returns:
         streams: List of torch.Streams for each group (including remaining)
         resources: List of CUdevResource for each group (including remaining)
@@ -157,7 +157,7 @@ def measure_generation_with_timing(model, tokenizer, inputs, output_length, devi
     """
     Generate tokens and measure TTFT (Time To First Token) and TPOT (Time Per Output Token).
     Supports batch inputs and computes per-sample metrics then averages them.
-    
+
     Returns:
         ttft_ms: Average time to first token in milliseconds
         tpot_ms: Average time per output token (excluding first token)
@@ -174,17 +174,36 @@ def measure_generation_with_timing(model, tokenizer, inputs, output_length, devi
     gen_start = time.perf_counter()
 
     with torch.no_grad():
-        input_ids = batch_input_ids.clone()
+        past_key_values = None
         attention_mask = inputs.get("attention_mask", None)
-        
+        current_attention_mask = attention_mask  # Initialize for first iteration
+
         layer_records = []
         for token_idx in range(output_length):
             token_gen_start = time.perf_counter()
-            
+
+            # First iteration: use full prompt, subsequent iterations: only new token
+            if token_idx == 0:
+                input_ids = batch_input_ids
+            else:
+                # Only process the newly generated token
+                input_ids = next_token_ids
+                # Update attention mask: append 1 for the new token
+                if current_attention_mask is not None:
+                    new_mask = torch.ones(
+                        (batch_size, 1),
+                        dtype=current_attention_mask.dtype,
+                        device=current_attention_mask.device
+                    )
+                    current_attention_mask = torch.cat(
+                        [current_attention_mask, new_mask], dim=-1)
+
             # Generate one token
             out = model(
                 input_ids=input_ids,
-                attention_mask=attention_mask,
+                attention_mask=current_attention_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
                 return_dict=True
             )
             if isinstance(out, tuple):
@@ -192,31 +211,36 @@ def measure_generation_with_timing(model, tokenizer, inputs, output_length, devi
             else:
                 outputs = out
                 layer_record_times = None
+
+            # Save past_key_values for next iteration
+            past_key_values = outputs.past_key_values
+
             logits = outputs.logits[:, -1, :]
             next_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
 
             torch.cuda.synchronize()
             token_gen_end = time.perf_counter()
-            token_time_ms = (token_gen_end - token_gen_start) * 1000
-            
-            # Record timing for each sample in batch
+
+            if token_idx != 0:
+                token_time_ms = (token_gen_end - token_gen_start) * 1000
+
+                # Record timing for each sample in batch
+                for batch_idx in range(batch_size):
+                    if token_idx == 0:
+                        first_token_times[batch_idx] = token_time_ms
+                    else:
+                        subsequent_token_times[batch_idx].append(token_time_ms)
+
+                    # Check for EOS token
+                    if next_token_ids[batch_idx].item() == tokenizer.eos_token_id:
+                        # Keep padding subsequent tokens for consistent measurement
+                        pass
+
+                if layer_record_times is not None:
+                    layer_records.append(layer_record_times)
+
             for batch_idx in range(batch_size):
-                if token_idx == 0:
-                    first_token_times[batch_idx] = token_time_ms
-                else:
-                    subsequent_token_times[batch_idx].append(token_time_ms)
-                
                 generated_counts[batch_idx] += 1
-                
-                # Check for EOS token
-                if next_token_ids[batch_idx].item() == tokenizer.eos_token_id:
-                    # Keep padding subsequent tokens for consistent measurement
-                    pass
-            
-            if layer_record_times is not None:
-                layer_records.append(layer_record_times)
-            # Append generated tokens
-            input_ids = torch.cat([input_ids, next_token_ids], dim=-1)
 
     gen_end = time.perf_counter()
 
@@ -237,7 +261,7 @@ def measure_generation_with_timing(model, tokenizer, inputs, output_length, devi
 def worker_run_on_stream(
     model,
     tokenizer,
-    stream_idx: int, 
+    stream_idx: int,
     stream: torch.cuda.Stream,
     sm_count: int,
     args,
@@ -248,7 +272,7 @@ def worker_run_on_stream(
     """
     Worker thread that creates an independent model instance on a green context stream
     and runs inference benchmarks.
-    
+
     Each worker:
     - Uses a model instance on the assigned stream
     - Runs inference with different batch sizes
@@ -257,14 +281,14 @@ def worker_run_on_stream(
     """
     try:
         print(f"[worker {stream_idx}] starting on stream with {sm_count} SMs")
-        
+
         # Ensure all operations are on this stream
         with torch.cuda.stream(stream):
             print(f"[worker {stream_idx}] model ready for inference")
-            
+
             # warm up: perform one inference
-            prompt_token_ids = [[randint(100, 8000) for _ in range(args.prompt_length)] 
-                                                for _ in range(1)]
+            prompt_token_ids = [[randint(100, 8000) for _ in range(args.prompt_length)]
+                                for _ in range(1)]
 
             # Pad sequences to same length
             inputs = tokenizer.pad(
@@ -275,40 +299,41 @@ def worker_run_on_stream(
             inputs = {k: v.to(stream.device) for k, v in inputs.items()}
 
             ttft_ms, tpot_ms, total_time_ms, generation_steps, layer_records = measure_generation_with_timing(
-                    model, tokenizer, inputs, args.output_length, stream.device
-                )
-                
-
+                model, tokenizer, inputs, args.output_length, stream.device
+            )
 
             # Test each batch size
             for batch_size in args.batch_sizes:
                 prompt_length = args.prompt_length
-                
+
                 # Run multiple repeats
                 for repeat_idx in range(args.num_repeat):
                     # Synchronize all workers before starting this repeat
                     if barrier is not None:
-                        print(f"[worker {stream_idx}] waiting at barrier for bs={batch_size} rep={repeat_idx}")
+                        print(
+                            f"[worker {stream_idx}] waiting at barrier for bs={batch_size} rep={repeat_idx}")
                         barrier.wait()
-                        print(f"[worker {stream_idx}] barrier released, starting inference")
-                    
+                        print(
+                            f"[worker {stream_idx}] barrier released, starting inference")
+
                     # Create random prompt tokens
-                    prompt_token_ids = [[randint(100, 8000) for _ in range(prompt_length)] 
+                    prompt_token_ids = [[randint(100, 8000) for _ in range(prompt_length)]
                                         for _ in range(batch_size)]
-                    
+
                     # Pad sequences to same length
                     inputs = tokenizer.pad(
                         {"input_ids": prompt_token_ids},
                         padding=True,
                         return_tensors="pt"
                     )
-                    inputs = {k: v.to(stream.device) for k, v in inputs.items()}
-                    
+                    inputs = {k: v.to(stream.device)
+                              for k, v in inputs.items()}
+
                     # Measure generation with TTFT and TPOT
                     ttft_ms, tpot_ms, total_time_ms, generation_steps, layer_records = measure_generation_with_timing(
                         model, tokenizer, inputs, args.output_length, stream.device
                     )
-                    
+
                     # Record result
                     result_row = {
                         "repeat_idx": repeat_idx,
@@ -322,11 +347,12 @@ def worker_run_on_stream(
                         "total_time_ms": total_time_ms,
                         "finish_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
                     }
-                    
+
                     output_path = os.path.join(args.log_dir, args.log_path)
                     with lock:
                         # Append single-row CSV without header
-                        pd.DataFrame([result_row]).to_csv(output_path, mode='a', header=False, index=False)
+                        pd.DataFrame([result_row]).to_csv(
+                            output_path, mode='a', header=False, index=False)
                         # Keep in-memory copy for summary if desired
                         results.append(result_row)
 
@@ -336,7 +362,8 @@ def worker_run_on_stream(
                             f"pl{prompt_length}_ol{args.output_length}.json"
                         )
                         json_path = os.path.join(args.log_dir, json_name)
-                        print(f"[worker {stream_idx}] writing JSON to {json_path}")
+                        print(
+                            f"[worker {stream_idx}] writing JSON to {json_path}")
                         with open(json_path, 'w') as fh:
                             json.dump({
                                 "stream_idx": stream_idx,
@@ -353,12 +380,12 @@ def worker_run_on_stream(
 
                     print(f"[worker {stream_idx}] bs={batch_size} rep={repeat_idx} "
                           f"tpot={tpot_ms:.2f}ms ttft={ttft_ms:.2f}ms total={total_time_ms:.2f}ms")
-            
+
             torch.cuda.empty_cache()
             cleanup()
             torch.cuda.synchronize()
             print(f"[worker {stream_idx}] finished and cleaned up")
-    
+
     except Exception as e:
         print(f"[worker {stream_idx}] error: {e}")
         import traceback
@@ -372,14 +399,14 @@ def benchmark_transformers_parallel_green_ctx(args):
     np.random.seed(42)
     torch.manual_seed(42)
     os.makedirs(args.log_dir, exist_ok=True)
-    
+
     # Create output CSV
     output_path = os.path.join(args.log_dir, args.log_path)
     df_header = pd.DataFrame(columns=[
         "repeat_idx",
-        "stream_idx", 
-        "sm_count", 
-        "batch_size", 
+        "stream_idx",
+        "sm_count",
+        "batch_size",
         "prompt_length",
         "generation_steps",
         "ttft_ms",
@@ -388,29 +415,32 @@ def benchmark_transformers_parallel_green_ctx(args):
         "finish_time"
     ])
     df_header.to_csv(output_path, index=False)
-    
+
     dev = torch.device("cuda:0")
-    
+
     # Create green context streams
     num_streams = args.num_streams
     min_sm_per_stream = args.min_sm_per_stream
-    
+
     print(f"\n{'='*60}")
-    print(f"Creating {num_streams} green context streams with min {min_sm_per_stream} SMs each")
+    print(
+        f"Creating {num_streams} green context streams with min {min_sm_per_stream} SMs each")
     print(f"{'='*60}\n")
-    
-    streams, resources = split_device_green_ctx(dev, num_streams, min_sm_per_stream)
-    
+
+    streams, resources = split_device_green_ctx(
+        dev, num_streams, min_sm_per_stream)
+
     # Get SM counts for each resource
     sm_counts = []
     for res in resources:
         try:
-            sm_count = res.sm.smCount if hasattr(res, 'sm') and hasattr(res.sm, 'smCount') else -1
+            sm_count = res.sm.smCount if hasattr(
+                res, 'sm') and hasattr(res.sm, 'smCount') else -1
         except Exception:
             sm_count = -1
         sm_counts.append(sm_count)
         print(f"Stream resource allocated: {sm_count} SMs")
-    
+
     print(f"streams number: {len(streams)}, SM counts: {sm_counts}\n")
 
     # Load tokenizer once
@@ -453,34 +483,36 @@ def benchmark_transformers_parallel_green_ctx(args):
         sm_counts = sm_counts[:num_streams]
     else:
         num_streams = num_streams + 1
-    
+
     # Create barrier for synchronizing all worker threads
     barrier = threading.Barrier(num_streams)
-    
+
     # Launch worker threads
     print(f"\nLaunching {num_streams} worker threads...")
     for stream_idx, (stream, sm_count) in enumerate(zip(streams, sm_counts)):
         t = threading.Thread(
             target=worker_run_on_stream,
-            args=(model, tokenizer, stream_idx, stream, sm_count, args, results, results_lock, barrier),
+            args=(model, tokenizer, stream_idx, stream, sm_count,
+                  args, results, results_lock, barrier),
             daemon=False
         )
         t.start()
         threads.append(t)
-    
+
     # Wait for all workers to finish
     print("Waiting for workers to finish...")
     for t in threads:
         t.join()
-    
+
     # Results are flushed incrementally by workers. Report summary.
     if results:
         print(f"\n{'='*60}")
-        print(f"Collected {len(results)} measurements (already flushed to {output_path})")
+        print(
+            f"Collected {len(results)} measurements (already flushed to {output_path})")
         print(f"{'='*60}\n")
     else:
         print("No results were collected.")
-    
+
     # Clean up
     del model
     torch.cuda.empty_cache()
@@ -506,15 +538,16 @@ def main():
                         help='Number of repeats for each batch size')
     parser.add_argument('--log-dir', type=str, default='parallel_transformers_green_ctx_results',
                         help='Output directory for logs')
-    parser.add_argument('--log-path', type=str, 
+    parser.add_argument('--log-path', type=str,
                         default='transformers_parallel_green_ctx_benchmark.csv',
                         help='Output CSV filename')
     parser.add_argument('--attention-impl', type=str, default='default',
                         choices=["eager", "flash_attention_2", "sdpa"],
                         help='Preferred attention implementation to enable on the model (best-effort)')
-    parser.add_argument('--no-leftover-mode', default=False, action='store_true',)
+    parser.add_argument('--no-leftover-mode',
+                        default=False, action='store_true',)
     args = parser.parse_args()
-    
+
     print("="*60)
     print("Transformers Parallel Green Context Benchmark")
     print("Multiple Independent Model Instances on Separate Streams")
@@ -525,7 +558,7 @@ def main():
     print(f"Batch sizes: {args.batch_sizes}")
     print(f"Num repeats: {args.num_repeat}")
     print("="*60)
-    
+
     benchmark_transformers_parallel_green_ctx(args)
 
 

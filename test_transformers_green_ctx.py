@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import modeling_qwen3_2 as local_qwen
 except ImportError:
+    print("No local Qwen model found")
     local_qwen = None
 
 # os.environ["TORCH_PROFILER_DIR"] = "./torch_profile"
@@ -131,7 +132,7 @@ def split_device_green_ctx(
 ) -> Tuple[List[torch.Stream], List[CUdevResource]]:
     """
     Split the device into multiple green contexts.
-    
+
     Returns:
         streams: List of torch.Streams for each group (including remaining)
         resources: List of CUdevResource for each group (including remaining)
@@ -147,7 +148,7 @@ def split_device_green_ctx(
 def measure_generation_with_timing(model, tokenizer, inputs, output_length, device):
     """
     Generate tokens and measure TTFT (Time To First Token) and TPOT (Time Per Output Token).
-    
+
     Returns:
         ttft_ms: Time to first token in milliseconds
         tpot_ms: Average time per output token (excluding first token)
@@ -165,15 +166,35 @@ def measure_generation_with_timing(model, tokenizer, inputs, output_length, devi
     gen_start = time.perf_counter()
 
     with torch.no_grad():
-        input_ids = batch_input_ids
+        past_key_values = None
         attention_mask = inputs.get("attention_mask", None)
+        current_attention_mask = attention_mask  # Initialize for first iteration
 
         layer_records = []
         for token_idx in range(output_length):
             token_gen_start = time.perf_counter()
+
+            # First iteration: use full prompt, subsequent iterations: only new token
+            if token_idx == 0:
+                input_ids = batch_input_ids
+            else:
+                # Only process the newly generated token
+                input_ids = next_token_ids
+                # Update attention mask: append 1 for the new token
+                if current_attention_mask is not None:
+                    new_mask = torch.ones(
+                        (batch_size, 1),
+                        dtype=current_attention_mask.dtype,
+                        device=current_attention_mask.device
+                    )
+                    current_attention_mask = torch.cat(
+                        [current_attention_mask, new_mask], dim=-1)
+
             out = model(
                 input_ids=input_ids,
-                attention_mask=attention_mask,
+                attention_mask=current_attention_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
                 return_dict=True,
             )
             if isinstance(out, tuple):
@@ -181,28 +202,33 @@ def measure_generation_with_timing(model, tokenizer, inputs, output_length, devi
             else:
                 outputs = out
                 layer_record_times = None
+
+            # Save past_key_values for next iteration
+            past_key_values = outputs.past_key_values
+
             logits = outputs.logits[:, -1, :]
-            next_token_ids = torch.argmax(logits, dim=-1, keepdim=True)  # (batch, 1)
-            
+            next_token_ids = torch.argmax(
+                logits, dim=-1, keepdim=True)  # (batch, 1)
+
             torch.cuda.synchronize()
             token_gen_end = time.perf_counter()
 
-            token_time_ms = (token_gen_end - token_gen_start) * 1000
+            if token_idx != 0:
+                token_time_ms = (token_gen_end - token_gen_start) * 1000
 
-            # Update per-sample timings and input_ids
+                # Update per-sample timings and input_ids
+                for i in range(batch_size):
+                    nid = int(next_token_ids[i, 0].item())
+                    if first_token_times[i] is None:
+                        first_token_times[i] = token_time_ms
+                    else:
+                        subsequent_token_times[i].append(token_time_ms)
+
+                if layer_record_times is not None:
+                    layer_records.append(layer_record_times)
+
             for i in range(batch_size):
-                nid = int(next_token_ids[i, 0].item())
-                if first_token_times[i] is None:
-                    first_token_times[i] = token_time_ms
-                else:
-                    subsequent_token_times[i].append(token_time_ms)
-
                 generated_counts[i] += 1
-
-            if layer_record_times is not None:
-                layer_records.append(layer_record_times)
-            # Append generated tokens to input_ids for next step
-            input_ids = torch.cat([input_ids, next_token_ids.to(input_ids.device)], dim=-1)
 
             # If all samples have produced EOS, stop early
             if all((int(next_token_ids[i, 0].item()) == tokenizer.eos_token_id) for i in range(batch_size)):
@@ -231,16 +257,16 @@ def benchmark_transformers_with_green_ctx(args):
     np.random.seed(42)
     torch.manual_seed(42)
     os.makedirs(args.log_dir, exist_ok=True)
-    
+
     dev = torch.device("cuda:0")
-    
+
     # Create output CSV file
     output_path = os.path.join(args.log_dir, args.log_path)
     df_header = pd.DataFrame(columns=[
-        "sm_partition_count", 
-        "stream_id", 
-        "sm_count", 
-        "batch_size", 
+        "sm_partition_count",
+        "stream_id",
+        "sm_count",
+        "batch_size",
         "prompt_length",
         "generation_steps",
         "ttft_ms",
@@ -249,31 +275,31 @@ def benchmark_transformers_with_green_ctx(args):
         "config_id"
     ])
     df_header.to_csv(output_path, index=False)
-    
+
     # Load tokenizer once
     print(f"Loading tokenizer from {args.model}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
+
     # Test different SM partition sizes
     sm_partition_sizes = args.sm_partition_sizes
-    
+
     for partition_idx, sm_size in enumerate(sm_partition_sizes):
         try:
             print(f"\n{'='*60}")
             print(f"Testing SM partition size: {sm_size}")
             print(f"{'='*60}")
-            
+
             # Split GPU resources
             streams, resources = split_device_green_ctx(dev, 1, sm_size)
             sm_counts = [r.sm.smCount for r in resources]
             print(f"SM counts: {sm_counts}")
-            
+
             # Test on the first stream (main inference stream)
             main_stream = streams[0]
             main_sm_count = sm_counts[0]
-            
+
             # Set the stream as current
             def trace_handler(prof):
                 prof.export_chrome_trace(
@@ -283,7 +309,7 @@ def benchmark_transformers_with_green_ctx(args):
                     )
                 )
                 print(f"Trace for SM partition {sm_size} saved.")
-            
+
             with torch.cuda.stream(main_stream):
                 # Load model
                 print(f"Loading model {args.model}...")
@@ -299,6 +325,7 @@ def benchmark_transformers_with_green_ctx(args):
                             device_map="cuda:0",
                             trust_remote_code=True,
                             dtype=torch.float16,
+                            use_cache=True,
                         )
                         model.eval()
                     except Exception:
@@ -315,8 +342,8 @@ def benchmark_transformers_with_green_ctx(args):
                     model.eval()
 
                 # warm up: perform one inference
-                prompt_token_ids = [[randint(100, 8000) for _ in range(args.prompt_length)] 
-                                                    for _ in range(1)]
+                prompt_token_ids = [[randint(100, 8000) for _ in range(args.prompt_length)]
+                                    for _ in range(1)]
 
                 # Pad sequences to same length
                 inputs = tokenizer.pad(
@@ -327,9 +354,9 @@ def benchmark_transformers_with_green_ctx(args):
                 inputs = {k: v.to(dev) for k, v in inputs.items()}
 
                 ttft_ms, tpot_ms, total_time_ms, generation_steps, layer_records = measure_generation_with_timing(
-                        model, tokenizer, inputs, args.output_length, dev
-                    )
-                
+                    model, tokenizer, inputs, args.output_length, dev
+                )
+
                 # Run profiling only when requested. Otherwise run the same workload
                 # without torch profiling to avoid trace export and overhead.
                 if args.profile:
@@ -356,22 +383,23 @@ def benchmark_transformers_with_green_ctx(args):
                             # Run multiple repeats
                             for repeat_idx in range(args.num_repeat):
                                 # Create random prompt tokens
-                                prompt_token_ids = [[randint(100, 8000) for _ in range(prompt_length)] 
+                                prompt_token_ids = [[randint(100, 8000) for _ in range(prompt_length)]
                                                     for _ in range(batch_size)]
-                                
+
                                 # Pad sequences to same length
                                 inputs = tokenizer.pad(
                                     {"input_ids": prompt_token_ids},
                                     padding=True,
                                     return_tensors="pt"
                                 )
-                                inputs = {k: v.to(dev) for k, v in inputs.items()}
-                                
+                                inputs = {k: v.to(dev)
+                                          for k, v in inputs.items()}
+
                                 # Measure generation time with TTFT and TPOT (supports batch)
                                 ttft_ms, tpot_ms, total_time_ms, generation_steps, layer_records = measure_generation_with_timing(
                                     model, tokenizer, inputs, output_length, dev
                                 )
-                                
+
                                 print(f"    Repeat {repeat_idx + 1}: "
                                       f"TTFT={ttft_ms:.2f}ms, "
                                       f"TPOT={tpot_ms:.2f}ms, "
@@ -391,13 +419,15 @@ def benchmark_transformers_with_green_ctx(args):
                                     "total_time_ms": total_time_ms,
                                     "config_id": f"{partition_idx}_{sm_size}"
                                 }])
-                                result_row.to_csv(output_path, mode='a', header=False, index=False)
+                                result_row.to_csv(
+                                    output_path, mode='a', header=False, index=False)
                                 try:
                                     json_name = (
                                         f"layer_times_sm{main_sm_count}_bs{batch_size}_rep{repeat_idx}_"
                                         f"pl{prompt_length}_ol{output_length}.json"
                                     )
-                                    json_path = os.path.join(args.log_dir, json_name)
+                                    json_path = os.path.join(
+                                        args.log_dir, json_name)
                                     with open(json_path, 'w') as fh:
                                         json.dump({
                                             "sm_count": main_sm_count,
@@ -409,13 +439,16 @@ def benchmark_transformers_with_green_ctx(args):
                                         }, fh)
                                 except Exception:
                                     pass
-                
+
                 else:
                     # No profiling: run the exact same workload without profiler
-                    print(f"Model on stream with {main_sm_count} SMs (no profile)...")
+                    print(
+                        f"Model on stream with {main_sm_count} SMs (no profile)...")
                     # Warm up: Test the stream
-                    a = torch.randn(4096*1024, device=torch.cuda.current_device(), dtype=torch.float16)
-                    b = torch.randn(4096*1024, device=torch.cuda.current_device(), dtype=torch.float16)
+                    a = torch.randn(
+                        4096*1024, device=torch.cuda.current_device(), dtype=torch.float16)
+                    b = torch.randn(
+                        4096*1024, device=torch.cuda.current_device(), dtype=torch.float16)
                     c = torch.matmul(a, b)
 
                     # Test different batch sizes
@@ -428,9 +461,9 @@ def benchmark_transformers_with_green_ctx(args):
                         # Run multiple repeats
                         for repeat_idx in range(args.num_repeat):
                             # Create random prompt tokens
-                            prompt_token_ids = [[randint(100, 8000) for _ in range(prompt_length)] 
+                            prompt_token_ids = [[randint(100, 8000) for _ in range(prompt_length)]
                                                 for _ in range(batch_size)]
-                            
+
                             # Pad sequences to same length
                             inputs = tokenizer.pad(
                                 {"input_ids": prompt_token_ids},
@@ -438,12 +471,12 @@ def benchmark_transformers_with_green_ctx(args):
                                 return_tensors="pt"
                             )
                             inputs = {k: v.to(dev) for k, v in inputs.items()}
-                            
+
                             # Measure generation time with TTFT and TPOT (supports batch)
                             ttft_ms, tpot_ms, total_time_ms, generation_steps, layer_records = measure_generation_with_timing(
                                 model, tokenizer, inputs, output_length, dev
                             )
-                            
+
                             print(f"    Repeat {repeat_idx + 1}: "
                                   f"TTFT={ttft_ms:.2f}ms, "
                                   f"TPOT={tpot_ms:.2f}ms, "
@@ -463,13 +496,15 @@ def benchmark_transformers_with_green_ctx(args):
                                 "total_time_ms": total_time_ms,
                                 "config_id": f"{partition_idx}_{sm_size}"
                             }])
-                            result_row.to_csv(output_path, mode='a', header=False, index=False)
+                            result_row.to_csv(
+                                output_path, mode='a', header=False, index=False)
                             try:
                                 json_name = (
                                     f"layer_times_sm{main_sm_count}_bs{batch_size}_rep{repeat_idx}_"
                                     f"pl{prompt_length}_ol{output_length}.json"
                                 )
-                                json_path = os.path.join(args.log_dir, json_name)
+                                json_path = os.path.join(
+                                    args.log_dir, json_name)
                                 with open(json_path, 'w') as fh:
                                     json.dump({
                                         "sm_count": main_sm_count,
@@ -481,20 +516,20 @@ def benchmark_transformers_with_green_ctx(args):
                                     }, fh)
                             except Exception:
                                 pass
-                
+
                 # Clean up
                 del model
                 torch.cuda.empty_cache()
                 cleanup()
 
                 torch.cuda.synchronize()
-                
+
         except RuntimeError as e:
             print(f"Error with SM partition size {sm_size}: {e}")
             import traceback
             traceback.print_exc()
             continue
-    
+
     print(f"\n{'='*60}")
     print(f"Benchmark completed! Results saved to: {output_path}")
     print(f"{'='*60}")
@@ -504,55 +539,58 @@ def create_comparison_plot(csv_path, output_dir=None):
     """Create visualization comparing different GPU partitions."""
     import matplotlib.pyplot as plt
     import seaborn as sns
-    
+
     if output_dir is None:
         output_dir = os.path.dirname(csv_path)
-    
+
     df = pd.read_csv(csv_path)
-    
+
     # Set style
     sns.set_style("whitegrid")
     plt.rcParams['figure.figsize'] = (14, 10)
-    
+
     # Create subplots
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    
+
     # Plot 1: Generation time vs SM partition count (grouped by batch size)
     ax1 = axes[0, 0]
     for bs in sorted(df['batch_size'].unique()):
         data = df[df['batch_size'] == bs]
         data_grouped = data.groupby('sm_partition_count')['tpot_ms'].mean()
-        ax1.plot(data_grouped.index, data_grouped.values, marker='o', label=f'BS={bs}')
+        ax1.plot(data_grouped.index, data_grouped.values,
+                 marker='o', label=f'BS={bs}')
     ax1.set_xlabel('SM Partition Count')
     ax1.set_ylabel('TPOT (ms)')
     ax1.set_title('TPOT vs GPU Partition Size')
     ax1.legend()
     ax1.grid(True)
-    
+
     # Plot 2: Total time vs SM partition count
     ax2 = axes[0, 1]
     for bs in sorted(df['batch_size'].unique()):
         data = df[df['batch_size'] == bs]
         data_grouped = data.groupby('sm_partition_count')['ttft_ms'].mean()
-        ax2.plot(data_grouped.index, data_grouped.values, marker='o', label=f'BS={bs}')
+        ax2.plot(data_grouped.index, data_grouped.values,
+                 marker='o', label=f'BS={bs}')
     ax2.set_xlabel('SM Partition Count')
     ax2.set_ylabel('TTFT (ms)')
     ax2.set_title('TTFT vs GPU Partition Size')
     ax2.legend()
     ax2.grid(True)
-    
+
     # Plot 3: Generation time vs batch size (grouped by partition)
     ax3 = axes[1, 0]
     for partition in sorted(df['sm_partition_count'].unique()):
         data = df[df['sm_partition_count'] == partition]
         data_grouped = data.groupby('batch_size')['tpot_ms'].mean()
-        ax3.plot(data_grouped.index, data_grouped.values, marker='s', label=f'SM={partition}')
+        ax3.plot(data_grouped.index, data_grouped.values,
+                 marker='s', label=f'SM={partition}')
     ax3.set_xlabel('Batch Size')
     ax3.set_ylabel('TPOT (ms)')
     ax3.set_title('TPOT vs Batch Size')
     ax3.legend()
     ax3.grid(True)
-    
+
     # Plot 4: Heatmap of TPOT
     ax4 = axes[1, 1]
     pivot_data = df.pivot_table(
@@ -561,11 +599,13 @@ def create_comparison_plot(csv_path, output_dir=None):
         columns='sm_partition_count',
         aggfunc='mean'
     )
-    sns.heatmap(pivot_data, annot=True, fmt='.2f', cmap='YlOrRd', ax=ax4, cbar_kws={'label': 'TPOT (ms)'})
+    sns.heatmap(pivot_data, annot=True, fmt='.2f', cmap='YlOrRd',
+                ax=ax4, cbar_kws={'label': 'TPOT (ms)'})
     ax4.set_title('TPOT Heatmap: Batch Size vs SM Partition')
-    
+
     plt.tight_layout()
-    output_file = os.path.join(output_dir, 'transformers_green_ctx_comparison.png')
+    output_file = os.path.join(
+        output_dir, 'transformers_green_ctx_comparison.png')
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
     print(f"Comparison plot saved to: {output_file}")
     plt.close()
@@ -590,7 +630,7 @@ def main():
                         help='Number of repeats for each configuration')
     parser.add_argument('--log-dir', type=str, default='profile_transformers_green_ctx',
                         help='Output directory for logs')
-    parser.add_argument('--log-path', type=str, 
+    parser.add_argument('--log-path', type=str,
                         default='transformers_green_ctx_benchmark.csv',
                         help='Output CSV filename')
     parser.add_argument('--plot', action='store_true',
@@ -600,9 +640,10 @@ def main():
     parser.add_argument('--attention-impl', type=str, default='eager',
                         choices=["eager", "flash_attention_2", "sdpa"],
                         help='Preferred attention implementation to enable on the model (best-effort)')
-    
+    parser.add_argument('--debug-shapes', action='store_true',
+                        help='Enable debug shapes for local Qwen model (if applicable)')
     args = parser.parse_args()
-    
+
     print("="*60)
     print("Transformers Green Context GPU Partitioning Benchmark")
     print("="*60)
@@ -612,10 +653,13 @@ def main():
     print(f"Num repeats: {args.num_repeat}")
     print(f"Profiling enabled: {args.profile}")
     print("="*60)
-    
+
+    if local_qwen is not None:
+        local_qwen.set_debug_shapes(args.debug_shapes)
+
     # Run benchmark
     benchmark_transformers_with_green_ctx(args)
-    
+
     # Generate plots if requested
     if args.plot:
         output_path = os.path.join(args.log_dir, args.log_path)
