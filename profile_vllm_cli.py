@@ -117,12 +117,13 @@ def decode_bench(args, barrier=None, file_lock=None, process_id=0):
         for bs in batch_sizes:
             output_len = args.output_len
 
-            if (prompt_token_length + output_len // 2) * bs > args.batched_tokens:
-                print(
-                    f"[Process {process_id}] Skipping batch size {bs} due to insufficient batched tokens, (prompt_token_length + output_len) * bs={prompt_token_length + output_len} * {bs} > {args.batched_tokens}")
-                continue
+            # actual_input_len = prompt_token_length - output_len // 2
+            actual_input_len = prompt_token_length
 
-            actual_input_len = prompt_token_length - output_len // 2
+            if (actual_input_len + output_len) * bs > args.batched_tokens:
+                print(
+                    f"[Process {process_id}] Skipping batch size {bs} due to insufficient batched tokens, (actual_input_len + output_len) * bs={actual_input_len + output_len} * {bs} > {args.batched_tokens}")
+                continue
 
             sampling_params = SamplingParams(
                 temperature=1,
@@ -170,27 +171,44 @@ def decode_bench(args, barrier=None, file_lock=None, process_id=0):
 
                 ttft = None
 
-                # prefill the requests first and get the TTFT
+                num_steps = 0
+                start = time.perf_counter()
                 while llm_engine.has_unfinished_requests():
                     # if barrier:
                     #     barrier.wait()  # Synchronize before step
-                    start = time.perf_counter()
+                    # print(f"[Process {process_id}] Prefill step {num_steps + 1}...")
                     step_outputs = llm_engine.step()
                     end = time.perf_counter()
                     ttft = None
-                    for output in step_outputs:
-                        if hasattr(output, 'outputs') and output.outputs:
-                            if len(output.outputs[0].token_ids) > 0:
-                                ttft = (end - start) * 1000  # in ms
-                                break
+                    # req_prefilled_list = []
+                    num_steps += 1
+                    if len(step_outputs) == bs:
+                        ttft = (end - start) * 1000  # in ms
+
+                    # print(f"[Process {process_id}] Prefill step {num_steps} completed, with {len(step_outputs)} step outputs")
+                    # for i, output in enumerate(step_outputs):
+                    #     print(f"[Process {process_id}] Checking step output {i} for TTFT, {output.outputs}")
+
+                    #     if hasattr(output, 'outputs') and output.outputs:
+                    #         all_req_prefilled = True
+                            
+                    #         for j, req_output in enumerate(output.outputs):
+                    #             print(f"[Process {process_id}] Step output {i} request output {j} has {len(req_output.token_ids)} tokens")
+                    #             if len(req_output.token_ids) == 0:
+                    #                 all_req_prefilled = False
+                    #                 break
+                    #         print(f"[Process {process_id}] Step output {i} has {len(output.outputs)} outputs, all_req_prefilled={all_req_prefilled}")
+                    #         if all_req_prefilled:
+                    #             ttft = (end - start) * 1000  # in ms
+                    #         req_prefilled_list.append(output.request_id)
 
                     if ttft is not None:
                         print(
                             f"[Process {process_id}] TTFT for prompt_length {prompt_token_length}, batch size {bs}, repeat {repeat_idx + 1}: {ttft:.2f} ms")
                         break
-                    else:
-                        print(
-                            f"[Process {process_id}] Prefill step completed but no tokens generated yet for prompt_length {prompt_token_length}, batch size {bs}, repeat {repeat_idx + 1}")
+                    # else:
+                    #     print(
+                    #         f"[Process {process_id}] Prefill step completed but no tokens generated yet for prompt_length {prompt_token_length}, batch size {bs}, repeat {repeat_idx + 1}")
 
                 while llm_engine.has_unfinished_requests():
                     start = time.perf_counter()
