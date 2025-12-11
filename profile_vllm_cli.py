@@ -19,6 +19,7 @@ from vllm import LLM, SamplingParams
 from vllm.inputs.data import TokensPrompt
 from vllm.sampling_params import RequestOutputKind
 from collections import defaultdict
+import torch
 
 
 def decode_bench(args, barrier=None, file_lock=None, process_id=0):
@@ -42,7 +43,7 @@ def decode_bench(args, barrier=None, file_lock=None, process_id=0):
         model=args.model,
         tensor_parallel_size=args.tp_size,
         max_model_len=args.max_model_len,
-        enforce_eager=False,  # enable CUDA graph
+        enforce_eager=args.enforce_eager,  # enable CUDA graph
         max_num_seqs=1024,
         max_num_batched_tokens=args.batched_tokens,
         gpu_memory_utilization=args.gpu_memory_utilization,
@@ -290,7 +291,7 @@ def decode_bench_combined_batch(args, barrier=None, file_lock=None, process_id=0
         model=args.model,
         tensor_parallel_size=args.tp_size,
         max_model_len=args.max_model_len,
-        enforce_eager=False,  # enable CUDA graph
+        enforce_eager=args.enforce_eager,  # enable CUDA graph
         max_num_seqs=1024,
         max_num_batched_tokens=args.batched_tokens,
         gpu_memory_utilization=args.gpu_memory_utilization,
@@ -636,6 +637,8 @@ def main():
                         help='Prompt lengths for each sub-batch in combined mode (array)')
     parser.add_argument('--combined-output-lengths', type=int, nargs='+', default=None,
                         help='Output lengths for each sub-batch in combined mode (array, min will be used)')
+    parser.add_argument('--enforce-eager', action='store_true',
+                        help='Enable eager mode')
 
     args = parser.parse_args()
 
