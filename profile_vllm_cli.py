@@ -640,7 +640,18 @@ def main():
     parser.add_argument('--enforce-eager', action='store_true',
                         help='Enable eager mode')
 
+    parser.add_argument('--custom-model', action='store_true',
+                        help='Use custom model')
+
     args = parser.parse_args()
+
+
+    if args.custom_model:
+        from vllm import ModelRegistry
+        ModelRegistry.register_model(
+            "Qwen3ForCausalLM",
+            "custom_models.qwen3:Qwen3ForCausalLM",
+        )
 
     # Validate combined batch mode arguments
     if args.combined_batch:
