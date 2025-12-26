@@ -356,6 +356,206 @@ def print_available_components(components: Dict[str, Callable]):
         f"  Example: python test_transformers_component_benchmark.py --component-name {sorted_components[0]}\n")
 
 
+def _make_defaults(bsz, seq_len, hidden_dim, dtype, device, model_config):
+    # bsz, seq_len, hidden_dim = hidden.shape
+    # For RoPE (Qwen3, LLaMA): return (cos, sin) tuple
+    # Standard RoPE: cos and sin have shape (1, seq_len, 1, head_dim)
+    # Calculate head_dim from model config if available, otherwise estimate
+    num_heads = None
+    num_kv_heads = None
+    head_dim = None
+
+    if model_config is not None:
+        num_heads = getattr(model_config, 'num_attention_heads', None)
+        num_kv_heads = getattr(
+            model_config, 'num_key_value_heads', num_heads)
+        head_dim = getattr(model_config, 'head_dim', None)
+
+    if not num_heads or num_heads <= 0:
+        num_heads = 8
+    if not num_kv_heads or num_kv_heads <= 0:
+        num_kv_heads = num_heads
+    if head_dim is None or head_dim <= 0:
+        head_dim = max(hidden_dim // num_heads, 1)
+
+    cos = torch.ones(1, seq_len, head_dim, dtype=dtype, device=device)
+    sin = torch.zeros(1, seq_len, head_dim, dtype=dtype, device=device)
+    pos_emb_rope = (cos, sin)
+
+    # Also provide a single tensor fallback for non-RoPE models
+    pos_emb_single = torch.zeros(
+        bsz, seq_len, hidden_dim, dtype=dtype, device=device)
+
+    # Generate proper 4D causal attention mask: (bsz, 1, seq_len, seq_len)
+    # Causal mask has -inf (or very negative value) for future positions, 0 for valid positions
+    past_seq_len = seq_len  # simulate cached prefix of same length
+    total_kv_len = seq_len + past_seq_len
+
+    mask_dtype = torch.float32 if dtype not in (
+        torch.float32, torch.float64) else dtype
+    causal_mask = torch.full(
+        (seq_len, total_kv_len),
+        torch.finfo(mask_dtype).min,
+        dtype=mask_dtype,
+        device=device,
+    )
+    row_ids = torch.arange(seq_len, device=device).unsqueeze(1)
+    col_ids = torch.arange(total_kv_len, device=device).unsqueeze(0)
+    valid = col_ids <= (past_seq_len + row_ids)
+    causal_mask = torch.where(valid, torch.zeros(
+        1, device=device, dtype=mask_dtype), causal_mask)
+    attn_mask = causal_mask.unsqueeze(0).unsqueeze(
+        0).expand(bsz, 1, seq_len, total_kv_len)
+    attn_mask = attn_mask.to(dtype)
+
+    past_key = torch.zeros(
+        bsz, num_kv_heads, past_seq_len, head_dim, dtype=dtype, device=device
+    )
+    past_value = torch.zeros_like(past_key)
+
+    past_key_values = BenchmarkCache(past_key, past_value)
+    return pos_emb_rope, pos_emb_single, attn_mask, past_key_values
+
+
+def prepare_component_args(module: torch.nn.Module, hidden: torch.Tensor, model_config=None):
+    """Prepare arguments for module forward call.
+
+    Returns:
+        tuple: (args, kwargs, call_func) where call_func is a function that takes (args, kwargs) and calls the module
+    """
+    sig = None
+    try:
+        sig = inspect.signature(module.forward)
+    except (ValueError, TypeError):
+        try:
+            sig = inspect.signature(module)
+        except Exception:
+            sig = None
+
+    bsz, seq_len, hidden_dim = hidden.shape
+
+    # Prepare all inputs (this is done outside timing)
+    pos_emb_rope, pos_emb_single, attn_mask, past_key_values = _make_defaults(
+        bsz, seq_len, hidden_dim, hidden.dtype, hidden.device, model_config
+    )
+
+    # Build kwargs based on parameter names when possible
+    if sig is not None:
+        params = list(sig.parameters.keys())
+        kwargs = {}
+        args = []
+
+        # Determine if this is likely an attention or FFN module
+        is_likely_attention = 'position_embeddings' in params or 'attention_mask' in params
+        is_likely_ffn = ('x' in params and len([p for p in params if p not in ['self', 'x']]) == 0) or \
+            ('mlp' in module.__class__.__name__.lower()
+             or 'ffn' in module.__class__.__name__.lower())
+
+        # For FFN modules, use simpler calling pattern
+        if is_likely_ffn and not is_likely_attention:
+            # FFN typically only needs the input tensor
+            if 'x' in params:
+                def call_func():
+                    return module(hidden)
+            elif 'hidden_states' in params:
+                def call_func():
+                    return module(hidden_states=hidden)
+            elif 'input' in params:
+                def call_func():
+                    return module(input=hidden)
+            else:
+                def call_func():
+                    return module(hidden)
+            return ([], {}, call_func)
+
+        # For attention modules, build proper arguments
+        if 'hidden_states' in params:
+            args.append(hidden)
+        elif 'x' in params:
+            args.append(hidden)
+        elif 'input' in params:
+            args.append(hidden)
+
+        # Use keyword arguments for optional parameters to avoid ordering issues
+        if 'position_embeddings' in params:
+            param_obj = sig.parameters['position_embeddings']
+            if param_obj.kind == inspect.Parameter.KEYWORD_ONLY:
+                kwargs['position_embeddings'] = pos_emb_rope
+            else:
+                args.append(pos_emb_rope)
+
+        if 'attention_mask' in params:
+            param_obj = sig.parameters['attention_mask']
+            if param_obj.kind == inspect.Parameter.KEYWORD_ONLY:
+                kwargs['attention_mask'] = attn_mask
+            else:
+                args.append(attn_mask)
+
+        if 'return_dict' in params:
+            kwargs['return_dict'] = False
+
+        if 'past_key_values' in params:
+            kwargs['past_key_values'] = past_key_values
+        if 'past_key_value' in params:
+            kwargs['past_key_value'] = past_key_values
+        if 'use_cache' in params:
+            kwargs['use_cache'] = True
+        if 'cache_position' in params:
+            cache_position = torch.arange(
+                seq_len, device=hidden.device, dtype=torch.long)
+            kwargs['cache_position'] = cache_position
+
+        # Create call function that only calls forward
+        def call_func():
+            return module(*args, **kwargs)
+
+        return (args, kwargs, call_func)
+
+    # Fallback: Try common call patterns
+    # For attention modules
+    def call_func_attn_rope():
+        return module(hidden, pos_emb_rope, attn_mask)
+
+    def call_func_attn_kwargs():
+        return module(hidden, position_embeddings=pos_emb_rope, attention_mask=attn_mask)
+
+    # For FFN modules or simple cases
+    def call_func_ffn():
+        return module(hidden)
+
+    def call_func_ffn_kwargs():
+        return module(x=hidden)
+
+    # Return a call function that tries fallback patterns
+    def call_func_fallback():
+        try:
+            return call_func_attn_rope()
+        except (TypeError, ValueError):
+            try:
+                return call_func_attn_kwargs()
+            except (TypeError, ValueError):
+                try:
+                    return call_func_ffn()
+                except (TypeError, ValueError):
+                    try:
+                        return call_func_ffn_kwargs()
+                    except (TypeError, ValueError):
+                        raise RuntimeError(
+                            f"Failed to invoke module {module.__class__.__name__} with any known calling pattern")
+
+    return ([], {}, call_func_fallback)
+
+
+def invoke_component(module: torch.nn.Module, hidden: torch.Tensor, model_config=None):
+    """Call the module with sensible defaults depending on its signature.
+
+    This function is kept for backward compatibility and warmup.
+    For timing measurements, use prepare_component_args + call_func instead.
+    """
+    _, _, call_func = prepare_component_args(module, hidden, model_config)
+    return call_func()
+
+
 def benchmark_component(
     component: torch.nn.Module,
     component_name: str,
@@ -381,185 +581,48 @@ def benchmark_component(
     times = []
     cuda_times = []
 
-    def _make_defaults(bsz, seq_len, hidden_dim, dtype, device, model_config):
-        # bsz, seq_len, hidden_dim = hidden.shape
-        # For RoPE (Qwen3, LLaMA): return (cos, sin) tuple
-        # Standard RoPE: cos and sin have shape (1, seq_len, 1, head_dim)
-        # Calculate head_dim from model config if available, otherwise estimate
-        num_heads = None
-        num_kv_heads = None
-        head_dim = None
-
-        if model_config is not None:
-            num_heads = getattr(model_config, 'num_attention_heads', None)
-            num_kv_heads = getattr(
-                model_config, 'num_key_value_heads', num_heads)
-            head_dim = getattr(model_config, 'head_dim', None)
-
-        if not num_heads or num_heads <= 0:
-            num_heads = 8
-        if not num_kv_heads or num_kv_heads <= 0:
-            num_kv_heads = num_heads
-        if head_dim is None or head_dim <= 0:
-            head_dim = max(hidden_dim // num_heads, 1)
-
-        cos = torch.ones(1, seq_len, head_dim, dtype=dtype, device=device)
-        sin = torch.zeros(1, seq_len, head_dim, dtype=dtype, device=device)
-        pos_emb_rope = (cos, sin)
-
-        # Also provide a single tensor fallback for non-RoPE models
-        pos_emb_single = torch.zeros(
-            bsz, seq_len, hidden_dim, dtype=dtype, device=device)
-
-        # Generate proper 4D causal attention mask: (bsz, 1, seq_len, seq_len)
-        # Causal mask has -inf (or very negative value) for future positions, 0 for valid positions
-        past_seq_len = seq_len  # simulate cached prefix of same length
-        total_kv_len = seq_len + past_seq_len
-
-        mask_dtype = torch.float32 if dtype not in (
-            torch.float32, torch.float64) else dtype
-        causal_mask = torch.full(
-            (seq_len, total_kv_len),
-            torch.finfo(mask_dtype).min,
-            dtype=mask_dtype,
-            device=device,
-        )
-        row_ids = torch.arange(seq_len, device=device).unsqueeze(1)
-        col_ids = torch.arange(total_kv_len, device=device).unsqueeze(0)
-        valid = col_ids <= (past_seq_len + row_ids)
-        causal_mask = torch.where(valid, torch.zeros(
-            1, device=device, dtype=mask_dtype), causal_mask)
-        attn_mask = causal_mask.unsqueeze(0).unsqueeze(
-            0).expand(bsz, 1, seq_len, total_kv_len)
-        attn_mask = attn_mask.to(dtype)
-
-        past_key = torch.zeros(
-            bsz, num_kv_heads, past_seq_len, head_dim, dtype=dtype, device=device
-        )
-        past_value = torch.zeros_like(past_key)
-
-        past_key_values = BenchmarkCache(past_key, past_value)
-        return pos_emb_rope, pos_emb_single, attn_mask, past_key_values
-
-    def invoke_component(module: torch.nn.Module, hidden: torch.Tensor):
-        """Call the module with sensible defaults depending on its signature.
-
-        Tries multiple reasonable argument combinations to support different module APIs
-        (some expect position_embeddings as (cos, sin) tuple for RoPE, others as single tensor).
-        """
-        sig = None
-        try:
-            sig = inspect.signature(module.forward)
-        except (ValueError, TypeError):
-            try:
-                sig = inspect.signature(module)
-            except Exception:
-                sig = None
-
-        bsz, seq_len, hidden_dim = hidden.shape
-        pos_emb_rope, pos_emb_single, attn_mask, past_key_values = _make_defaults(
-            bsz, seq_len, hidden_dim, hidden.dtype, hidden.device, model_config
-        )
-
-        # Log main tensor shapes for debugging (q/k/v projections, pos embeddings, masks)
-        # try:
-        #     print(f"shapes: hidden={hidden.shape}, pos_emb_rope=({pos_emb_rope[0].shape}, {pos_emb_rope[1].shape}), pos_emb_single={pos_emb_single.shape}, attn_mask={attn_mask.shape}")
-        # except Exception:
-        #     pass
-
-        # Build kwargs based on parameter names when possible
-        if sig is not None:
-            params = list(sig.parameters.keys())
-            kwargs = {}
-            args = []
-            # print(f'params: {params}')
-            # common param names mapping
-            if 'hidden_states' in params or 'x' in params or 'input' in params:
-                args.append(hidden)
-
-            if 'position_embeddings' in params:
-                # Try RoPE first (cos, sin tuple), then fall back to single tensor
-                args.append(pos_emb_rope)
-
-            if 'attention_mask' in params:
-                args.append(attn_mask)
-
-            # pass return_dict=False when present to avoid structured outputs
-            if 'return_dict' in params:
-                kwargs['return_dict'] = False
-
-            # Some modules accept past_key_values; pass None
-            if 'past_key_values' in params:
-                kwargs['past_key_values'] = past_key_values
-            if 'past_key_value' in params:
-                kwargs['past_key_value'] = past_key_values
-            if 'use_cache' in params:
-                kwargs['use_cache'] = True
-
-            try:
-                return module(*args, **kwargs)
-            except (TypeError, ValueError) as e:
-                # If RoPE failed (unpacking error), try with single tensor
-                if 'position_embeddings' in params and 'unpack' in str(e).lower() or 'tuple' in str(e).lower():
-                    args_fallback = []
-                    if 'hidden_states' in params or 'x' in params or 'input' in params:
-                        args_fallback.append(hidden)
-                    if 'position_embeddings' in params:
-                        args_fallback.append(pos_emb_single)
-                    if 'attention_mask' in params:
-                        args_fallback.append(attn_mask)
-                    try:
-                        return module(*args_fallback, **kwargs)
-                    except (TypeError, ValueError):
-                        pass
-                # Fallbacks below
-                pass
-
-        # Try common call patterns with RoPE
-        try:
-            return module(hidden, pos_emb_rope, attn_mask)
-        except (TypeError, ValueError):
-            pass
-
-        # Try common call patterns with single pos_emb
-        # try:
-        #     return module(hidden, pos_emb_single, attn_mask)
-        # except (TypeError, ValueError):
-        #     pass
-
-        try:
-            return module(hidden, attention_mask=attn_mask)
-        except (TypeError, ValueError):
-            pass
-
-        try:
-            return module(hidden)
-        except Exception as e:
-            # Reraise with more context
-            raise
+    # Prepare arguments once (outside timing)
+    try:
+        _, _, call_func = prepare_component_args(
+            component, hidden_states, model_config)
+    except Exception as e:
+        print(f"  Error preparing args for {component_name}: {e}")
+        raise
 
     # Warmup
     with torch.no_grad():
         for _ in range(warmup):
             try:
-                _ = invoke_component(component, hidden_states)
+                _ = invoke_component(component, hidden_states, model_config)
             except Exception as warmup_err:
                 print(f"  Warmup error: {warmup_err}")
                 raise
 
     torch.cuda.synchronize()
 
-    # Actual measurements
+    # Actual measurements - only measure forward call time
     with torch.no_grad():
         for _ in range(num_repeats):
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
+
+            # Synchronize before timing to ensure clean measurement
+            torch.cuda.synchronize()
+
             start = time.perf_counter()
             start_event.record()
-            _ = invoke_component(component, hidden_states)
+
+            # Only measure the forward call time
+            try:
+                _ = call_func()
+            except Exception as e:
+                print(f"  Component {component_name} error: {e}")
+                raise
+
             end_event.record()
             torch.cuda.synchronize()
             end = time.perf_counter()
+
             times.append((end - start) * 1000)  # Convert to ms
             cuda_times.append(start_event.elapsed_time(end_event))
 

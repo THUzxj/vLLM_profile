@@ -16,6 +16,7 @@ Key features:
 - Lock-protected CSV writing to avoid conflicts
 - Supports testing different SM partition sizes
 - Measures TTFT and TPOT for all batch sizes
+- Each stream can have different batch_size, prompt_length, and output_length
 """
 
 import argparse
@@ -153,10 +154,18 @@ def split_device_green_ctx(
     return streams, resources
 
 
-def measure_generation_with_timing(model, tokenizer, inputs, output_length, device):
+def measure_generation_with_timing(model, tokenizer, inputs, output_length, device, stream=None):
     """
     Generate tokens and measure TTFT (Time To First Token) and TPOT (Time Per Output Token).
     Supports batch inputs and computes per-sample metrics then averages them.
+
+    Args:
+        model: The model to use
+        tokenizer: The tokenizer
+        inputs: Input dictionary with input_ids and attention_mask
+        output_length: Number of tokens to generate
+        device: Device to run on
+        stream: CUDA stream to use for synchronization (optional)
 
     Returns:
         ttft_ms: Average time to first token in milliseconds
@@ -180,7 +189,6 @@ def measure_generation_with_timing(model, tokenizer, inputs, output_length, devi
 
         layer_records = []
         for token_idx in range(output_length):
-            token_gen_start = time.perf_counter()
 
             # First iteration: use full prompt, subsequent iterations: only new token
             if token_idx == 0:
@@ -198,6 +206,7 @@ def measure_generation_with_timing(model, tokenizer, inputs, output_length, devi
                     current_attention_mask = torch.cat(
                         [current_attention_mask, new_mask], dim=-1)
 
+            token_gen_start = time.perf_counter()
             # Generate one token
             out = model(
                 input_ids=input_ids,
@@ -206,6 +215,12 @@ def measure_generation_with_timing(model, tokenizer, inputs, output_length, devi
                 use_cache=True,
                 return_dict=True
             )
+
+            if stream is not None:
+                stream.synchronize()
+            else:
+                torch.cuda.synchronize()
+            token_gen_end = time.perf_counter()
             if isinstance(out, tuple):
                 outputs, layer_record_times = out
             else:
@@ -217,9 +232,6 @@ def measure_generation_with_timing(model, tokenizer, inputs, output_length, devi
 
             logits = outputs.logits[:, -1, :]
             next_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
-
-            torch.cuda.synchronize()
-            token_gen_end = time.perf_counter()
 
             if token_idx != 0:
                 token_time_ms = (token_gen_end - token_gen_start) * 1000
@@ -264,7 +276,12 @@ def worker_run_on_stream(
     stream_idx: int,
     stream: torch.cuda.Stream,
     sm_count: int,
-    args,
+    batch_size: int,
+    prompt_length: int,
+    output_length: int,
+    num_repeat: int,
+    log_dir: str,
+    log_path: str,
     results: List[dict],
     lock: threading.Lock,
     barrier: threading.Barrier = None
@@ -275,19 +292,21 @@ def worker_run_on_stream(
 
     Each worker:
     - Uses a model instance on the assigned stream
-    - Runs inference with different batch sizes
+    - Runs inference with stream-specific batch_size, prompt_length, and output_length
     - Measures TPOT, TTFT, and total time per batch
     - Appends results to shared list (protected by lock)
     """
     try:
         print(f"[worker {stream_idx}] starting on stream with {sm_count} SMs")
+        print(
+            f"[worker {stream_idx}] config: batch_size={batch_size}, prompt_length={prompt_length}, output_length={output_length}")
 
         # Ensure all operations are on this stream
         with torch.cuda.stream(stream):
             print(f"[worker {stream_idx}] model ready for inference")
 
             # warm up: perform one inference
-            prompt_token_ids = [[randint(100, 8000) for _ in range(args.prompt_length)]
+            prompt_token_ids = [[randint(100, 8000) for _ in range(prompt_length)]
                                 for _ in range(1)]
 
             # Pad sequences to same length
@@ -299,87 +318,84 @@ def worker_run_on_stream(
             inputs = {k: v.to(stream.device) for k, v in inputs.items()}
 
             ttft_ms, tpot_ms, total_time_ms, generation_steps, layer_records = measure_generation_with_timing(
-                model, tokenizer, inputs, args.output_length, stream.device
+                model, tokenizer, inputs, output_length, stream.device, stream
             )
 
-            # Test each batch size
-            for batch_size in args.batch_sizes:
-                prompt_length = args.prompt_length
+            # Run multiple repeats
+            for repeat_idx in range(num_repeat):
 
-                # Run multiple repeats
-                for repeat_idx in range(args.num_repeat):
-                    # Synchronize all workers before starting this repeat
-                    if barrier is not None:
-                        print(
-                            f"[worker {stream_idx}] waiting at barrier for bs={batch_size} rep={repeat_idx}")
-                        barrier.wait()
-                        print(
-                            f"[worker {stream_idx}] barrier released, starting inference")
+                # Create random prompt tokens
+                prompt_token_ids = [[randint(100, 8000) for _ in range(prompt_length)]
+                                    for _ in range(batch_size)]
 
-                    # Create random prompt tokens
-                    prompt_token_ids = [[randint(100, 8000) for _ in range(prompt_length)]
-                                        for _ in range(batch_size)]
+                # Pad sequences to same length
+                inputs = tokenizer.pad(
+                    {"input_ids": prompt_token_ids},
+                    padding=True,
+                    return_tensors="pt"
+                )
+                inputs = {k: v.to(stream.device)
+                          for k, v in inputs.items()}
 
-                    # Pad sequences to same length
-                    inputs = tokenizer.pad(
-                        {"input_ids": prompt_token_ids},
-                        padding=True,
-                        return_tensors="pt"
+                # Synchronize all workers before starting inference
+                if barrier is not None:
+                    print(
+                        f"[worker {stream_idx}] waiting at barrier for rep={repeat_idx}")
+                    barrier.wait()
+                    print(
+                        f"[worker {stream_idx}] barrier released, starting inference")
+
+                # Measure generation with TTFT and TPOT
+                ttft_ms, tpot_ms, total_time_ms, generation_steps, layer_records = measure_generation_with_timing(
+                    model, tokenizer, inputs, output_length, stream.device, stream
+                )
+
+                # Record result
+                result_row = {
+                    "repeat_idx": repeat_idx,
+                    "stream_idx": stream_idx,
+                    "sm_count": sm_count,
+                    "batch_size": batch_size,
+                    "prompt_length": prompt_length,
+                    "generation_steps": generation_steps,
+                    "ttft_ms": ttft_ms,
+                    "tpot_ms": tpot_ms,
+                    "total_time_ms": total_time_ms,
+                    "finish_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                }
+
+                output_path = os.path.join(log_dir, log_path)
+                with lock:
+                    # Append single-row CSV without header
+                    pd.DataFrame([result_row]).to_csv(
+                        output_path, mode='a', header=False, index=False)
+                    # Keep in-memory copy for summary if desired
+                    results.append(result_row)
+
+                try:
+                    json_name = (
+                        f"layer_times_stream{stream_idx}_sm{sm_count}_bs{batch_size}_rep{repeat_idx}_"
+                        f"pl{prompt_length}_ol{output_length}.json"
                     )
-                    inputs = {k: v.to(stream.device)
-                              for k, v in inputs.items()}
+                    json_path = os.path.join(log_dir, json_name)
+                    print(
+                        f"[worker {stream_idx}] writing JSON to {json_path}")
+                    with open(json_path, 'w') as fh:
+                        json.dump({
+                            "stream_idx": stream_idx,
+                            "sm_count": sm_count,
+                            "batch_size": batch_size,
+                            "repeat_idx": repeat_idx,
+                            "prompt_length": prompt_length,
+                            "output_length": output_length,
+                            "layer_records": layer_records,
+                        }, fh)
+                except Exception as e:
+                    print(f"[worker {stream_idx}] error writing JSON: {e}")
+                    pass
 
-                    # Measure generation with TTFT and TPOT
-                    ttft_ms, tpot_ms, total_time_ms, generation_steps, layer_records = measure_generation_with_timing(
-                        model, tokenizer, inputs, args.output_length, stream.device
-                    )
-
-                    # Record result
-                    result_row = {
-                        "repeat_idx": repeat_idx,
-                        "stream_idx": stream_idx,
-                        "sm_count": sm_count,
-                        "batch_size": batch_size,
-                        "prompt_length": prompt_length,
-                        "generation_steps": generation_steps,
-                        "ttft_ms": ttft_ms,
-                        "tpot_ms": tpot_ms,
-                        "total_time_ms": total_time_ms,
-                        "finish_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-                    }
-
-                    output_path = os.path.join(args.log_dir, args.log_path)
-                    with lock:
-                        # Append single-row CSV without header
-                        pd.DataFrame([result_row]).to_csv(
-                            output_path, mode='a', header=False, index=False)
-                        # Keep in-memory copy for summary if desired
-                        results.append(result_row)
-
-                    try:
-                        json_name = (
-                            f"layer_times_stream{stream_idx}_sm{sm_count}_bs{batch_size}_rep{repeat_idx}_"
-                            f"pl{prompt_length}_ol{args.output_length}.json"
-                        )
-                        json_path = os.path.join(args.log_dir, json_name)
-                        print(
-                            f"[worker {stream_idx}] writing JSON to {json_path}")
-                        with open(json_path, 'w') as fh:
-                            json.dump({
-                                "stream_idx": stream_idx,
-                                "sm_count": sm_count,
-                                "batch_size": batch_size,
-                                "repeat_idx": repeat_idx,
-                                "prompt_length": prompt_length,
-                                "output_length": args.output_length,
-                                "layer_records": layer_records,
-                            }, fh)
-                    except Exception as e:
-                        print(f"[worker {stream_idx}] error writing JSON: {e}")
-                        pass
-
-                    print(f"[worker {stream_idx}] bs={batch_size} rep={repeat_idx} "
-                          f"tpot={tpot_ms:.2f}ms ttft={ttft_ms:.2f}ms total={total_time_ms:.2f}ms")
+                print(f"[worker {stream_idx}] bs={batch_size} pl={prompt_length} ol={output_length} rep={repeat_idx} "
+                      f"tpot={tpot_ms:.2f}ms ttft={ttft_ms:.2f}ms total={total_time_ms:.2f}ms")
 
             torch.cuda.empty_cache()
             cleanup()
@@ -395,6 +411,7 @@ def worker_run_on_stream(
 def benchmark_transformers_parallel_green_ctx(args):
     """
     Benchmark Transformers with multiple independent instances on separate green context streams.
+    Each stream can have different batch_size, prompt_length, and output_length.
     """
     np.random.seed(42)
     torch.manual_seed(42)
@@ -421,6 +438,22 @@ def benchmark_transformers_parallel_green_ctx(args):
     # Create green context streams
     num_streams = args.num_streams
     min_sm_per_stream = args.min_sm_per_stream
+
+    # Validate array lengths
+    expected_length = num_streams if args.no_leftover_mode else num_streams + 1
+
+    if len(args.batch_sizes) != expected_length:
+        raise ValueError(
+            f"batch_sizes length ({len(args.batch_sizes)}) must match number of streams ({expected_length})"
+        )
+    if len(args.prompt_lengths) != expected_length:
+        raise ValueError(
+            f"prompt_lengths length ({len(args.prompt_lengths)}) must match number of streams ({expected_length})"
+        )
+    if len(args.output_lengths) != expected_length:
+        raise ValueError(
+            f"output_lengths length ({len(args.output_lengths)}) must match number of streams ({expected_length})"
+        )
 
     print(f"\n{'='*60}")
     print(
@@ -481,19 +514,35 @@ def benchmark_transformers_parallel_green_ctx(args):
     if args.no_leftover_mode:
         streams = streams[:num_streams]
         sm_counts = sm_counts[:num_streams]
+        batch_sizes = args.batch_sizes[:num_streams]
+        prompt_lengths = args.prompt_lengths[:num_streams]
+        output_lengths = args.output_lengths[:num_streams]
     else:
         num_streams = num_streams + 1
+        batch_sizes = args.batch_sizes
+        prompt_lengths = args.prompt_lengths
+        output_lengths = args.output_lengths
 
     # Create barrier for synchronizing all worker threads
     barrier = threading.Barrier(num_streams)
 
     # Launch worker threads
     print(f"\nLaunching {num_streams} worker threads...")
-    for stream_idx, (stream, sm_count) in enumerate(zip(streams, sm_counts)):
+    print("Stream configurations:")
+    for stream_idx in range(num_streams):
+        print(f"  Stream {stream_idx}: batch_size={batch_sizes[stream_idx]}, "
+              f"prompt_length={prompt_lengths[stream_idx]}, "
+              f"output_length={output_lengths[stream_idx]}")
+
+    for stream_idx, (stream, sm_count, batch_size, prompt_length, output_length) in enumerate(
+        zip(streams, sm_counts, batch_sizes, prompt_lengths, output_lengths)
+    ):
         t = threading.Thread(
             target=worker_run_on_stream,
             args=(model, tokenizer, stream_idx, stream, sm_count,
-                  args, results, results_lock, barrier),
+                  batch_size, prompt_length, output_length,
+                  args.num_repeat, args.log_dir, args.log_path,
+                  results, results_lock, barrier),
             daemon=False
         )
         t.start()
@@ -520,22 +569,23 @@ def benchmark_transformers_parallel_green_ctx(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Parallel Transformers benchmarking with independent instances on green context streams'
+        description='Parallel Transformers benchmarking with independent instances on green context streams. '
+                    'Each stream can have different batch_size, prompt_length, and output_length.'
     )
     parser.add_argument('--model', type=str, default='/nfs/xjzhang/Qwen/Qwen3-4B',
                         help='Model path or HuggingFace model ID')
-    parser.add_argument('--prompt-length', type=int, default=512,
-                        help='Prompt length')
-    parser.add_argument('--output-length', type=int, default=128,
-                        help='Output length to generate')
-    parser.add_argument('--batch-sizes', type=int, nargs='+', default=[1, 2, 4, 8],
-                        help='Batch sizes to test')
+    parser.add_argument('--prompt-lengths', type=int, nargs='+', required=True,
+                        help='Prompt lengths for each stream (array, length must match number of streams)')
+    parser.add_argument('--output-lengths', type=int, nargs='+', required=True,
+                        help='Output lengths for each stream (array, length must match number of streams)')
+    parser.add_argument('--batch-sizes', type=int, nargs='+', required=True,
+                        help='Batch sizes for each stream (array, length must match number of streams)')
     parser.add_argument('--num-streams', type=int, default=1,
                         help='Number of parallel streams to create')
     parser.add_argument('--min-sm-per-stream', type=int, default=32,
                         help='Minimum SMs per stream')
     parser.add_argument('--num-repeat', type=int, default=2,
-                        help='Number of repeats for each batch size')
+                        help='Number of repeats for each stream')
     parser.add_argument('--log-dir', type=str, default='parallel_transformers_green_ctx_results',
                         help='Output directory for logs')
     parser.add_argument('--log-path', type=str,
@@ -545,17 +595,21 @@ def main():
                         choices=["eager", "flash_attention_2", "sdpa"],
                         help='Preferred attention implementation to enable on the model (best-effort)')
     parser.add_argument('--no-leftover-mode',
-                        default=False, action='store_true',)
+                        default=False, action='store_true',
+                        help='If set, do not use the leftover stream')
     args = parser.parse_args()
 
     print("="*60)
     print("Transformers Parallel Green Context Benchmark")
     print("Multiple Independent Model Instances on Separate Streams")
+    print("Per-Stream Configuration Support")
     print("="*60)
     print(f"Model: {args.model}")
     print(f"Num Streams: {args.num_streams}")
     print(f"Min SMs per Stream: {args.min_sm_per_stream}")
     print(f"Batch sizes: {args.batch_sizes}")
+    print(f"Prompt lengths: {args.prompt_lengths}")
+    print(f"Output lengths: {args.output_lengths}")
     print(f"Num repeats: {args.num_repeat}")
     print("="*60)
 

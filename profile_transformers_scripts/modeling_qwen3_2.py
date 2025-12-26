@@ -94,6 +94,12 @@ class Qwen3MLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
+        if DEBUG_SHAPES:
+            try:
+                print(f"[QWEN_SHAPES] Qwen3MLP.forward x={x.shape} gate_proj={self.gate_proj(x).shape} up_proj={self.up_proj(x).shape} act_fn={self.act_fn(self.gate_proj(x)).shape} down_proj={self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x)).shape}")
+            except Exception:
+                print("[QWEN_SHAPES] Qwen3MLP: failed to print shapes")
+
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
@@ -209,6 +215,9 @@ class Qwen3Attention(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        
+        record_times = {}
+
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
@@ -249,6 +258,12 @@ class Qwen3Attention(nn.Module):
         if self.config._attn_implementation != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
+        
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start = time.perf_counter()
+        start_event.record()
+
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
@@ -260,6 +275,12 @@ class Qwen3Attention(nn.Module):
             sliding_window=self.sliding_window,  # diff with Llama
             **kwargs,
         )
+
+        end_event.record()
+        torch.cuda.synchronize()
+        end = time.perf_counter()
+        record_times['attn_forward'] = end - start
+        record_times['attn_forward_cuda'] = start_event.elapsed_time(end_event) / 1000.0
 
         if DEBUG_SHAPES:
             try:
@@ -281,7 +302,7 @@ class Qwen3Attention(nn.Module):
                 print(f"[QWEN_SHAPES] after o_proj attn_output={attn_output.shape}")
             except Exception:
                 pass
-        return attn_output, attn_weights
+        return attn_output, attn_weights, record_times
 
 
 class Qwen3DecoderLayer(GradientCheckpointingLayer):
@@ -324,7 +345,7 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         start = time.perf_counter()
         start_event.record()
 
-        attn_out, attn_weights = self.self_attn(
+        attn_out, attn_weights, attn_record_times = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -334,13 +355,13 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
             position_embeddings=position_embeddings,
             **kwargs,
         )
-
-        end = time.perf_counter()
         end_event.record()
         torch.cuda.synchronize()
+        end = time.perf_counter()
         record_times["attn"] = end - start
+        record_times["attn_cuda"] = start_event.elapsed_time(end_event) / 1000.0
 
-        record_times["attn_cuda"] = start_event.elapsed_time(end_event)
+        record_times['attn_details'] = attn_record_times
 
         if DEBUG_SHAPES:
             try:
@@ -360,11 +381,11 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         start = time.perf_counter()
         start_event.record()
         hidden_states = self.mlp(hidden_states)
-        end = time.perf_counter()
         end_event.record()
         torch.cuda.synchronize()
+        end = time.perf_counter()
         record_times['ffn'] = end - start
-        record_times['ffn_cuda'] = start_event.elapsed_time(end_event)
+        record_times['ffn_cuda'] = start_event.elapsed_time(end_event) / 1000.0
         hidden_states = residual + hidden_states
         return hidden_states, record_times
 
