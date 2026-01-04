@@ -12,7 +12,10 @@ export CUDA_VISIBLE_DEVICES=0
 BATCH_SIZE=${1:-8}
 KV_LEN=${2:-2048}
 SEQ_LEN=1  # 对于 MLP benchmark，使用 seq_len
-OUTPUT_DIR=${3:-nsys_profile_result}  # 输出目录，默认为 nsys_profile_result
+MODEL_SIZE=${4:-"4B"}
+OUTPUT_DIR=${3:-"nsys_profile_result_${MODEL_SIZE}"}  # 输出目录，默认为 nsys_profile_result
+
+RUN_OUTPUT_DIR="${OUTPUT_DIR}/run_output"
 
 # 获取脚本所在目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +23,7 @@ cd "${SCRIPT_DIR}"
 
 # 创建输出目录
 mkdir -p "${OUTPUT_DIR}"
-
+mkdir -p "${RUN_OUTPUT_DIR}"
 echo "配置参数:"
 echo "  Batch size: ${BATCH_SIZE}"
 echo "  KV length: ${KV_LEN}"
@@ -43,7 +46,7 @@ for benchmark in "${BENCHMARKS[@]}"; do
 done
 
 # 设置输出文件前缀
-OUTPUT_PREFIX="nsys_profile"
+OUTPUT_PREFIX="$OUTPUT_DIR/nsys_profile"
 
 # 1. Profile benchmark_qwen3_mlp.py
 echo "=========================================="
@@ -59,10 +62,10 @@ nsys profile -o "${OUTPUT_FILE}" \
     --gpu-metrics-devices=0 \
     --gpu-metrics-frequency=20000 \
     --gpu-metrics-set=ga100 \
-    python "${SCRIPT_DIR}/benchmark_qwen3_mlp.py" \
+    python3 "${SCRIPT_DIR}/benchmark_qwen3_mlp.py" \
         --batch-sizes ${BATCH_SIZE} \
         --seq-lens 1 \
-        --output-dir "${OUTPUT_DIR}"
+        --output-dir "${RUN_OUTPUT_DIR}"
 
 if [ $? -eq 0 ]; then
     echo "✓ benchmark_qwen3_mlp.py profile 完成"
@@ -86,10 +89,10 @@ nsys profile -o "${OUTPUT_FILE}" \
     --gpu-metrics-devices=0 \
     --gpu-metrics-frequency=20000 \
     --gpu-metrics-set=ga100 \
-    python "${SCRIPT_DIR}/benchmark_flash_attn.py" \
+    python3 "${SCRIPT_DIR}/benchmark_flash_attn.py" \
         --batch-sizes ${BATCH_SIZE} \
         --kv-lens ${KV_LEN} \
-        --output-dir "${OUTPUT_DIR}"
+        --output-dir "${RUN_OUTPUT_DIR}"
 
 if [ $? -eq 0 ]; then
     echo "✓ benchmark_flash_attn.py profile 完成"
@@ -113,10 +116,10 @@ nsys profile -o "${OUTPUT_FILE}" \
     --gpu-metrics-devices=0 \
     --gpu-metrics-frequency=20000 \
     --gpu-metrics-set=ga100 \
-    python "${SCRIPT_DIR}/benchmark_attention_layer.py" \
+    python3 "${SCRIPT_DIR}/benchmark_attention_layer.py" \
         --batch-sizes ${BATCH_SIZE} \
         --kv-lens ${KV_LEN} \
-        --output-dir "${OUTPUT_DIR}"
+        --output-dir "${RUN_OUTPUT_DIR}"
 
 if [ $? -eq 0 ]; then
     echo "✓ benchmark_attention_layer.py profile 完成"

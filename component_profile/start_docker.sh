@@ -1,0 +1,1 @@
+docker run --gpus all -v  /data/xjzhang:/xingjian --privileged nvidia/cuda:12.9.0-devel-ubuntu22.04 sleep infinity 

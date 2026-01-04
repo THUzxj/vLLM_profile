@@ -31,11 +31,34 @@ from vllm.forward_context import set_forward_context
 from vllm.platforms import current_platform
 from vllm.attention.layer import Attention
 
-# Qwen3-4B parameters
-NUM_HEADS = 32
-NUM_KV_HEADS = 8
-HEAD_SIZE = 128
-HIDDEN_SIZE = NUM_HEADS * HEAD_SIZE
+# Qwen3 model configurations
+QWEN3_MODEL_CONFIGS = {
+    "0.6B": {
+        "num_heads": 16,
+        "num_kv_heads": 8,
+        "head_size": 128,
+        "hidden_size": 2048,
+    },
+    "4B": {
+        "num_heads": 32,
+        "num_kv_heads": 8,
+        "head_size": 128,
+        "hidden_size": 4096,
+    },
+    "32B": {
+        "num_heads": 64,
+        "num_kv_heads": 8,
+        "head_size": 128,
+        "hidden_size": 8192,
+    },
+}
+
+# Default to Qwen3-4B for backward compatibility
+DEFAULT_MODEL = "4B"
+NUM_HEADS = QWEN3_MODEL_CONFIGS[DEFAULT_MODEL]["num_heads"]
+NUM_KV_HEADS = QWEN3_MODEL_CONFIGS[DEFAULT_MODEL]["num_kv_heads"]
+HEAD_SIZE = QWEN3_MODEL_CONFIGS[DEFAULT_MODEL]["head_size"]
+HIDDEN_SIZE = QWEN3_MODEL_CONFIGS[DEFAULT_MODEL]["hidden_size"]
 
 # Benchmark parameters
 WARMUP_ITERATIONS = 10
@@ -504,6 +527,7 @@ def run_benchmark_suite(
     batch_sizes: Optional[list[int]] = None,
     kv_lens: Optional[list[int]] = None,
     output_dir: Optional[str] = None,
+    model_size: str = DEFAULT_MODEL,
 ):
     """Run a comprehensive benchmark suite.
 
@@ -511,12 +535,26 @@ def run_benchmark_suite(
         batch_sizes: List of batch sizes to test. If None, uses default values.
         kv_lens: List of KV lengths to test. If None, uses default values.
         output_dir: Directory to save output files. If None, saves to current directory.
+        model_size: Model size to use ("0.6B", "4B", or "32B"). Defaults to "4B".
     """
+    # Get model configuration
+    if model_size not in QWEN3_MODEL_CONFIGS:
+        raise ValueError(
+            f"Unknown model size: {model_size}. "
+            f"Supported sizes: {list(QWEN3_MODEL_CONFIGS.keys())}"
+        )
+    model_config = QWEN3_MODEL_CONFIGS[model_size]
+    num_heads = model_config["num_heads"]
+    num_kv_heads = model_config["num_kv_heads"]
+    head_size = model_config["head_size"]
+    hidden_size = model_config["hidden_size"]
+
     print("Starting Attention Layer Decode Benchmark Suite...")
-    print(f"Model: Qwen3-4B")
-    print(f"  Num heads: {NUM_HEADS}")
-    print(f"  Num KV heads: {NUM_KV_HEADS}")
-    print(f"  Head size: {HEAD_SIZE}")
+    print(f"Model: Qwen3-{model_size}")
+    print(f"  Num heads: {num_heads}")
+    print(f"  Num KV heads: {num_kv_heads}")
+    print(f"  Head size: {head_size}")
+    print(f"  Hidden size: {hidden_size}")
     print(f"Warmup iterations: {WARMUP_ITERATIONS}")
     print(f"Benchmark iterations: {BENCHMARK_ITERATIONS}\n")
 
@@ -533,9 +571,9 @@ def run_benchmark_suite(
         {
             "batch_size": batch_size,
             "kv_len": kv_len,
-            "num_heads": NUM_HEADS,
-            "num_kv_heads": NUM_KV_HEADS,
-            "head_size": HEAD_SIZE,
+            "num_heads": num_heads,
+            "num_kv_heads": num_kv_heads,
+            "head_size": head_size,
             "dtype": torch.bfloat16,
             "block_size": 16,
             "num_blocks": 8192,
@@ -597,6 +635,14 @@ if __name__ == "__main__":
         help="Directory to save output files (CSV and plots). "
         "If not specified, saves to current directory.",
     )
+    parser.add_argument(
+        "--model-size",
+        type=str,
+        default=DEFAULT_MODEL,
+        choices=list(QWEN3_MODEL_CONFIGS.keys()),
+        help=f"Model size to benchmark. Options: {list(QWEN3_MODEL_CONFIGS.keys())}. "
+        f"Default: {DEFAULT_MODEL}",
+    )
     args = parser.parse_args()
 
     # Run benchmark suite
@@ -604,6 +650,7 @@ if __name__ == "__main__":
         batch_sizes=args.batch_sizes,
         kv_lens=args.kv_lens,
         output_dir=args.output_dir,
+        model_size=args.model_size,
     )
 
     # You can also run individual benchmarks

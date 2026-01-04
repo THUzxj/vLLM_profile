@@ -20,6 +20,25 @@ from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
                                   flash_attn_with_kvcache,
                                   is_fa_version_supported)
 
+# Qwen3 model configurations
+QWEN3_MODEL_CONFIGS = {
+    "0.6B": {
+        "num_heads": (16, 8),
+        "head_size": 128,
+    },
+    "4B": {
+        "num_heads": (32, 8),
+        "head_size": 128,
+    },
+    "32B": {
+        "num_heads": (64, 8),
+        "head_size": 128,
+    },
+}
+
+# Default to Qwen3-4B for backward compatibility
+DEFAULT_MODEL = "4B"
+
 # Test configurations
 NUM_HEADS = [(4, 4), (8, 2), (32, 8), (64, 8)]
 HEAD_SIZES = [64, 128, 256]
@@ -244,7 +263,7 @@ def save_results_to_csv(
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         filename = os.path.join(output_dir, filename)
-    
+
     rows = []
     for result in results:
         if "error" in result:
@@ -283,7 +302,7 @@ def plot_results(
     """Create three plots from benchmark results."""
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-    
+
     # Filter out rows with missing data
     df = df.dropna(subset=["batch_size", "kv_len", "mean_time_ms"])
     df = df.astype({"batch_size": int, "kv_len": int})
@@ -304,7 +323,8 @@ def plot_results(
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plot_path = os.path.join(output_dir, f"{output_prefix}_kv_len_vs_time.png") if output_dir else f"{output_prefix}_kv_len_vs_time.png"
+    plot_path = os.path.join(
+        output_dir, f"{output_prefix}_kv_len_vs_time.png") if output_dir else f"{output_prefix}_kv_len_vs_time.png"
     plt.savefig(plot_path, dpi=300)
     print(f"Saved plot: {plot_path}")
     plt.close()
@@ -322,7 +342,8 @@ def plot_results(
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plot_path = os.path.join(output_dir, f"{output_prefix}_batch_size_vs_time.png") if output_dir else f"{output_prefix}_batch_size_vs_time.png"
+    plot_path = os.path.join(
+        output_dir, f"{output_prefix}_batch_size_vs_time.png") if output_dir else f"{output_prefix}_batch_size_vs_time.png"
     plt.savefig(plot_path, dpi=300)
     print(f"Saved plot: {plot_path}")
     plt.close()
@@ -342,7 +363,8 @@ def plot_results(
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plot_path = os.path.join(output_dir, f"{output_prefix}_kv_len_batch_size_vs_time.png") if output_dir else f"{output_prefix}_kv_len_batch_size_vs_time.png"
+    plot_path = os.path.join(
+        output_dir, f"{output_prefix}_kv_len_batch_size_vs_time.png") if output_dir else f"{output_prefix}_kv_len_batch_size_vs_time.png"
     plt.savefig(plot_path, dpi=300)
     print(f"Saved plot: {plot_path}")
     plt.close()
@@ -352,6 +374,9 @@ def run_benchmark_suite(
     batch_sizes: Optional[list[int]] = None,
     kv_lens: Optional[list[int]] = None,
     output_dir: Optional[str] = None,
+    model_size: str = DEFAULT_MODEL,
+    warmup_iterations: int = WARMUP_ITERATIONS,
+    benchmark_iterations: int = BENCHMARK_ITERATIONS,
 ):
     """Run a comprehensive benchmark suite.
 
@@ -359,10 +384,24 @@ def run_benchmark_suite(
         batch_sizes: List of batch sizes to test. If None, uses default values.
         kv_lens: List of KV lengths to test. If None, uses default values.
         output_dir: Directory to save output files. If None, saves to current directory.
+        model_size: Model size to use ("0.6B", "4B", or "32B"). Defaults to "4B".
     """
+    # Get model configuration
+    if model_size not in QWEN3_MODEL_CONFIGS:
+        raise ValueError(
+            f"Unknown model size: {model_size}. "
+            f"Supported sizes: {list(QWEN3_MODEL_CONFIGS.keys())}"
+        )
+    model_config = QWEN3_MODEL_CONFIGS[model_size]
+    num_heads = model_config["num_heads"]
+    head_size = model_config["head_size"]
+
     print("Starting Flash Attention with KV Cache Benchmark Suite...")
-    print(f"Warmup iterations: {WARMUP_ITERATIONS}")
-    print(f"Benchmark iterations: {BENCHMARK_ITERATIONS}\n")
+    print(f"Model: Qwen3-{model_size}")
+    print(f"  Num heads (Q, KV): {num_heads}")
+    print(f"  Head size: {head_size}")
+    print(f"Warmup iterations: {warmup_iterations}")
+    print(f"Benchmark iterations: {benchmark_iterations}\n")
 
     torch.set_default_device("cuda")
 
@@ -378,9 +417,8 @@ def run_benchmark_suite(
         {
             "batch_size": batch_size,
             "kv_len": kv_len,
-            # Qwen3-4B: num_attention_heads=32, num_key_value_heads=8
-            "num_heads": (32, 8),
-            "head_size": 128,  # Qwen3-4B: head_dim=128
+            "num_heads": num_heads,
+            "head_size": head_size,
             "dtype": torch.bfloat16,
             "block_size": 16,
             "soft_cap": None,
@@ -408,7 +446,10 @@ def run_benchmark_suite(
 
         # Run benchmark with generated kv_lens
         results = benchmark_flash_attn_with_kvcache(
-            kv_lens=kv_lens, **config_copy)
+            kv_lens=kv_lens,
+            warmup_iterations=warmup_iterations,
+            benchmark_iterations=benchmark_iterations,
+            **config_copy)
 
         # Add batch_size and kv_len to results config
         if "config" in results:
@@ -452,6 +493,26 @@ if __name__ == "__main__":
         help="Directory to save output files (CSV and plots). "
         "If not specified, saves to current directory.",
     )
+    parser.add_argument(
+        "--model-size",
+        type=str,
+        default=DEFAULT_MODEL,
+        choices=list(QWEN3_MODEL_CONFIGS.keys()),
+        help=f"Model size to benchmark. Options: {list(QWEN3_MODEL_CONFIGS.keys())}. "
+        f"Default: {DEFAULT_MODEL}",
+    )
+    parser.add_argument(
+        "--warmup-iterations",
+        type=int,
+        default=WARMUP_ITERATIONS,
+        help=f"Number of warmup iterations. Default: {WARMUP_ITERATIONS}",
+    )
+    parser.add_argument(
+        "--benchmark-iterations",
+        type=int,
+        default=BENCHMARK_ITERATIONS,
+        help=f"Number of benchmark iterations. Default: {BENCHMARK_ITERATIONS}",
+    )
     args = parser.parse_args()
 
     # Run benchmark suite
@@ -459,6 +520,9 @@ if __name__ == "__main__":
         batch_sizes=args.batch_sizes,
         kv_lens=args.kv_lens,
         output_dir=args.output_dir,
+        model_size=args.model_size,
+        warmup_iterations=args.warmup_iterations,
+        benchmark_iterations=args.benchmark_iterations,
     )
 
     # You can also run individual benchmarks

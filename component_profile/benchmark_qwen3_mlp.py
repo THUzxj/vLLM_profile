@@ -7,6 +7,7 @@ Benchmark script for Qwen3MLP performance measurement with different input sizes
 
 import argparse
 import os
+import tempfile
 import time
 from typing import Optional
 
@@ -15,15 +16,94 @@ import pandas as pd
 import torch
 from torch import nn
 
+from vllm.distributed.parallel_state import (cleanup_dist_env_and_memory,
+                                             init_distributed_environment,
+                                             initialize_model_parallel,
+                                             model_parallel_is_initialized)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
 
+# Qwen3 model configurations
+QWEN3_MODEL_CONFIGS = {
+    "0.6B": {
+        "hidden_size": 1024,
+        "intermediate_size": 3072,
+    },
+    "4B": {
+        "hidden_size": 2560,
+        "intermediate_size": 9728,
+    },
+    "14B": {
+        "hidden_size": 5120,
+        "intermediate_size": 17408,
+    },
+    "32B": {
+        "hidden_size": 5120,
+        "intermediate_size": 25600,
+    },
+}
+
+# Default to Qwen3-4B for backward compatibility
+DEFAULT_MODEL = "4B"
+
 # Benchmark parameters
 WARMUP_ITERATIONS = 10
 BENCHMARK_ITERATIONS = 100
+
+# Global flag to track if distributed environment is initialized
+_dist_env_initialized = False
+_dist_init_temp_file = None
+
+
+def ensure_distributed_initialized():
+    """Ensure distributed environment and model parallel groups are initialized."""
+    global _dist_env_initialized, _dist_init_temp_file
+
+    if _dist_env_initialized:
+        return
+
+    if not torch.distributed.is_initialized():
+        # Create a temporary file for distributed initialization
+        _dist_init_temp_file = tempfile.mkstemp()[1]
+
+        backend = "nccl"
+        if current_platform.is_cpu() or current_platform.is_tpu():
+            backend = "gloo"
+
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method=f"file://{_dist_init_temp_file}",
+            local_rank=0,
+            backend=backend,
+        )
+
+    # Initialize model parallel groups (tensor_parallel_size=1, pipeline_parallel_size=1)
+    if not model_parallel_is_initialized():
+        initialize_model_parallel(
+            tensor_model_parallel_size=1,
+            pipeline_model_parallel_size=1,
+        )
+
+    _dist_env_initialized = True
+
+
+def cleanup_distributed():
+    """Clean up distributed environment if it was initialized by this script."""
+    global _dist_env_initialized, _dist_init_temp_file
+
+    if _dist_env_initialized:
+        cleanup_dist_env_and_memory(shutdown_ray=False)
+        if _dist_init_temp_file and os.path.exists(_dist_init_temp_file):
+            try:
+                os.unlink(_dist_init_temp_file)
+            except Exception:
+                pass
+        _dist_env_initialized = False
+        _dist_init_temp_file = None
 
 
 class Qwen3MLP(nn.Module):
@@ -92,6 +172,9 @@ def benchmark_qwen3_mlp(
     Returns:
         dict: Benchmark results including mean, min, max times and throughput.
     """
+    # Ensure distributed environment is initialized
+    ensure_distributed_initialized()
+
     # Setup
     current_platform.seed_everything(0)
     torch.set_default_device(device)
@@ -320,6 +403,9 @@ def run_benchmark_suite(
     batch_sizes: Optional[list[int]] = None,
     seq_lens: Optional[list[int]] = None,
     output_dir: Optional[str] = None,
+    model_size: str = DEFAULT_MODEL,
+    warmup_iterations: int = WARMUP_ITERATIONS,
+    benchmark_iterations: int = BENCHMARK_ITERATIONS,
 ):
     """Run a comprehensive benchmark suite with different input sizes.
 
@@ -327,18 +413,25 @@ def run_benchmark_suite(
         batch_sizes: List of batch sizes to test. If None, uses default values.
         seq_lens: List of sequence lengths to test. If None, uses default values.
         output_dir: Directory to save output files. If None, saves to current directory.
+        model_size: Model size to use ("0.6B", "4B", or "32B"). Defaults to "4B".
     """
-    print("Starting Qwen3MLP Benchmark Suite...")
-    print(f"Warmup iterations: {WARMUP_ITERATIONS}")
-    print(f"Benchmark iterations: {BENCHMARK_ITERATIONS}\n")
+    # Get model configuration
+    if model_size not in QWEN3_MODEL_CONFIGS:
+        raise ValueError(
+            f"Unknown model size: {model_size}. "
+            f"Supported sizes: {list(QWEN3_MODEL_CONFIGS.keys())}"
+        )
+    model_config = QWEN3_MODEL_CONFIGS[model_size]
 
-    # Common model configurations (Qwen3 typical sizes)
-    model_configs = [
-        {"hidden_size": 2560, "intermediate_size": 9728},   # Qwen3-4B
-        # {"hidden_size": 4096, "intermediate_size": 11008},  # Qwen3-7B
-        # {"hidden_size": 8192, "intermediate_size": 28672},  # Qwen3-14B
-        # {"hidden_size": 3584, "intermediate_size": 9728},   # Qwen3-1.5B
-    ]
+    print("Starting Qwen3MLP Benchmark Suite...")
+    print(f"Model: Qwen3-{model_size}")
+    print(f"  Hidden size: {model_config['hidden_size']}")
+    print(f"  Intermediate size: {model_config['intermediate_size']}")
+    print(f"Warmup iterations: {warmup_iterations}")
+    print(f"Benchmark iterations: {benchmark_iterations}\n")
+
+    # Use the selected model configuration
+    model_configs = [model_config]
 
     # Test different combinations of batch_size and seq_len
     if batch_sizes is None:
@@ -375,11 +468,15 @@ def run_benchmark_suite(
                     hidden_size=model_config["hidden_size"],
                     intermediate_size=model_config["intermediate_size"],
                     dtype=dtype,
+                    warmup_iterations=warmup_iterations,
+                    benchmark_iterations=benchmark_iterations,
                 )
                 all_results.append(results)
                 print_benchmark_results(results)
             except Exception as e:
                 print(f"ERROR: Failed to run benchmark: {e}\n")
+                import traceback
+                print(traceback.format_exc())
                 all_results.append({"error": str(e), "config": {
                     "batch_size": batch_size,
                     "seq_len": seq_len,
@@ -389,6 +486,9 @@ def run_benchmark_suite(
     # Save results to CSV and create plots
     df = save_results_to_csv(all_results, output_dir=output_dir)
     plot_results(df, output_dir=output_dir)
+
+    # Clean up distributed environment
+    cleanup_distributed()
 
     return all_results
 
@@ -433,6 +533,26 @@ if __name__ == "__main__":
         help="Directory to save output files (CSV and plots). "
         "If not specified, saves to current directory.",
     )
+    parser.add_argument(
+        "--model-size",
+        type=str,
+        default=DEFAULT_MODEL,
+        choices=list(QWEN3_MODEL_CONFIGS.keys()),
+        help=f"Model size to benchmark. Options: {list(QWEN3_MODEL_CONFIGS.keys())}. "
+        f"Default: {DEFAULT_MODEL}",
+    )
+    parser.add_argument(
+        "--warmup-iterations",
+        type=int,
+        default=WARMUP_ITERATIONS,
+        help=f"Number of warmup iterations. Default: {WARMUP_ITERATIONS}",
+    )
+    parser.add_argument(
+        "--benchmark-iterations",
+        type=int,
+        default=BENCHMARK_ITERATIONS,
+        help=f"Number of benchmark iterations. Default: {BENCHMARK_ITERATIONS}",
+    )
     args = parser.parse_args()
 
     # Run comprehensive benchmark suite
@@ -440,6 +560,9 @@ if __name__ == "__main__":
         batch_sizes=args.batch_sizes,
         seq_lens=args.seq_lens,
         output_dir=args.output_dir,
+        model_size=args.model_size,
+        warmup_iterations=args.warmup_iterations,
+        benchmark_iterations=args.benchmark_iterations,
     )
 
     # You can also run a single benchmark
