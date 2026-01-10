@@ -1,0 +1,7 @@
+*.csv
+*.json
+*.png
+*.html
+*.pyc
+*.nsys-rep
+*.ncu-rep
