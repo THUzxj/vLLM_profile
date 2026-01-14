@@ -1,7 +1,11 @@
-export CUDA_VISIBLE_DEVICES=0         # 这里以GPU0为例，其他卡类似
-export CUDA_MPS_PIPE_DIRECTORY=/data/xjzhang/mps/nvidia-mps # Select a location that's accessible to the given $UID
-export CUDA_MPS_LOG_DIRECTORY=/data/xjzhang/mps/nvidia-log
+export CUDA_VISIBLE_DEVICES=1         # 这里以GPU0为例，其他卡类似
+export CUDA_MPS_PIPE_DIRECTORY=$PWD/mps_files/nvidia-mps # Select a location that's accessible to the given $UID
+export CUDA_MPS_LOG_DIRECTORY=$PWD/mps_files/nvidia-log
 export CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=50
+
+
+mkdir -p $CUDA_MPS_PIPE_DIRECTORY
+mkdir -p $CUDA_MPS_LOG_DIRECTORY
 
 # ====== 启动 =========
 sudo nvidia-smi -i 0 -c EXCLUSIVE_PROCESS  # 让GPU0变为独享模式。

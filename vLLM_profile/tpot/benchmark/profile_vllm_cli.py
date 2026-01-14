@@ -192,7 +192,7 @@ def decode_bench(args, barrier=None, file_lock=None, process_id=0):
 
                     #     if hasattr(output, 'outputs') and output.outputs:
                     #         all_req_prefilled = True
-                            
+
                     #         for j, req_output in enumerate(output.outputs):
                     #             print(f"[Process {process_id}] Step output {i} request output {j} has {len(req_output.token_ids)} tokens")
                     #             if len(req_output.token_ids) == 0:
@@ -642,28 +642,39 @@ def main():
 
     parser.add_argument('--custom-model', action='store_true',
                         help='Use custom model')
-    
+    parser.add_argument('--custom-model-path', type=str, default=None,
+                        help='Path to custom models directory')
+
     parser.add_argument('--max-num-seqs', type=int, default=1024,
                         help='Maximum number of sequences')
 
-    args = parser.parse_args()
+    # Process GPU resource allocation
+    parser.add_argument('--process-gpu-percentage', type=int, nargs='+', default=None,
+                        help='GPU resource allocation percentage for each process (list of integers)')
 
+    args = parser.parse_args()
 
     if args.custom_model:
         from vllm import ModelRegistry
         import sys
         sys.path.append(os.path.abspath('.'))
-        ModelRegistry.register_model(
-            "Qwen3ForCausalLM",
-            "custom_models.qwen3:Qwen3ForCausalLM",
-        )
+        if args.custom_model_path is None:
+            ModelRegistry.register_model(
+                "Qwen3ForCausalLM",
+                "custom_models.qwen3:Qwen3ForCausalLM",
+            )
 
-        ModelRegistry.register_model(
-            "LlamaForCausalLM",
-            "custom_models.llama:LlamaForCausalLM",
-        )
+            ModelRegistry.register_model(
+                "LlamaForCausalLM",
+                "custom_models.llama:LlamaForCausalLM",
+            )
+        else:
+            ModelRegistry.register_model(
+                "Qwen3ForCausalLM",
+                f"{args.custom_model_path}",
+            )
 
-    # Validate combined batch mode arguments
+            # Validate combined batch mode arguments
     if args.combined_batch:
         if args.combined_batch_sizes is None or args.combined_prompt_lengths is None or args.combined_output_lengths is None:
             raise ValueError(
@@ -710,9 +721,19 @@ def main():
         print(f"KV Cache Memory Bytes: {args.kv_cache_memory_bytes}")
     print(f"Window Size: {args.window_size}")
     print(f"Num Processes: {args.num_processes}")
+    if args.process_gpu_percentage is not None:
+        print(f"GPU Percentage Per Process: {args.process_gpu_percentage}")
     print("="*60)
 
     if args.num_processes > 1:
+        # Validate GPU percentage configuration
+        if args.process_gpu_percentage is not None:
+            if len(args.process_gpu_percentage) != args.num_processes:
+                raise ValueError(
+                    f"process_gpu_percentage length ({len(args.process_gpu_percentage)}) must match "
+                    f"num_processes ({args.num_processes})"
+                )
+
         # Create barrier and lock for multiprocessing
         barrier = Barrier(args.num_processes)
         file_lock = Lock()
@@ -720,8 +741,14 @@ def main():
         # Create and start processes
         processes = []
         for i in range(args.num_processes):
+            # Prepare environment variables for the process
+            process_env = os.environ.copy()
+            if args.process_gpu_percentage is not None:
+                process_env['CUDA_MPS_ACTIVE_THREAD_PERCENTAGE'] = str(
+                    args.process_gpu_percentage[i])
+
             p = mp.Process(target=benchmark_func, args=(
-                args, barrier, file_lock, i))
+                args, barrier, file_lock, i), env=process_env)
             p.start()
             processes.append(p)
 

@@ -24,9 +24,9 @@
 """Inference-only Qwen3 model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
+import os
 from typing import Any, Optional, Union
 from itertools import islice
-
 
 import torch
 from torch import nn
@@ -55,6 +55,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+
 
 logger = init_logger(__name__)
 
@@ -117,7 +118,7 @@ class Qwen3Attention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
+            # rotary_dim=self.head_dim,
             max_position=max_position,
             rope_parameters=rope_parameters,
             dual_chunk_attention_config=dual_chunk_attention_config,
@@ -158,7 +159,9 @@ class Qwen3Attention(nn.Module):
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
+
         attn_output = self.attn(q, k, v)
+
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -177,7 +180,6 @@ class Qwen3DecoderLayer(nn.Module):
         dual_chunk_attention_config = getattr(
             config, "dual_chunk_attention_config", None
         )
-
         # By default, Qwen3 uses causal attention as it is a decoder-only model.
         # You can override the HF config with `is_causal=False` to enable
         # bidirectional attention, which is used in some embedding models
@@ -202,6 +204,7 @@ class Qwen3DecoderLayer(nn.Module):
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
+
         self.mlp = Qwen3MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
@@ -228,14 +231,15 @@ class Qwen3DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
-
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
+
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -393,6 +397,9 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        print("Initializing Customed Qwen3ForCausalLM model...")
+
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 

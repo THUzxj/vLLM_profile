@@ -117,7 +117,7 @@ class Qwen3Attention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
+            # rotary_dim=self.head_dim,
             max_position=max_position,
             rope_parameters=rope_parameters,
             dual_chunk_attention_config=dual_chunk_attention_config,
@@ -271,6 +271,8 @@ class Qwen3Model(Qwen2Model):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        # print(
+        #     f"Qwen3Model forward called. input_ids shape: {input_ids.shape}, positions shape: {positions.shape}, inputs_embeds shape: {inputs_embeds.shape if inputs_embeds is not None else None}")
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
