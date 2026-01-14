@@ -106,7 +106,8 @@ def benchmark_flash_attn_varlen(
         }
 
     # Setup
-    current_platform.seed_everything(42 + process_id)  # Different seed for each process
+    # Different seed for each process
+    current_platform.seed_everything(42 + process_id)
     num_seqs = len(kv_lens)
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
@@ -123,7 +124,7 @@ def benchmark_flash_attn_varlen(
     query_len = 1
     num_tokens = num_seqs * query_len
     query = torch.randn(num_tokens, num_query_heads, head_size, dtype=dtype)
-    
+
     # KV cache shape: (num_blocks, block_size, num_kv_heads, head_size)
     key_cache = torch.randn(
         num_blocks,
@@ -304,7 +305,7 @@ def save_results_to_csv(
     num_processes: int = 1,
 ):
     """Save benchmark results to CSV file.
-    
+
     Args:
         results: List of benchmark results
         filename: Output CSV filename
@@ -316,7 +317,7 @@ def save_results_to_csv(
     """
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-    
+
     # Use process-specific log file if multiple processes
     if num_processes > 1:
         base_name = os.path.splitext(filename)[0]
@@ -324,7 +325,8 @@ def save_results_to_csv(
         data_path = os.path.join(
             output_dir, f"{base_name}_proc{process_id}{ext}") if output_dir else f"{base_name}_proc{process_id}{ext}"
     else:
-        data_path = os.path.join(output_dir, filename) if output_dir else filename
+        data_path = os.path.join(
+            output_dir, filename) if output_dir else filename
 
     rows = []
     for result in results:
@@ -352,7 +354,7 @@ def save_results_to_csv(
         rows.append(row)
 
     df = pd.DataFrame(rows)
-    
+
     # Initialize CSV file with headers if it doesn't exist
     if not os.path.exists(data_path):
         if file_lock:
@@ -369,7 +371,7 @@ def save_results_to_csv(
                 df.to_csv(data_path, mode='a', header=False, index=False)
         else:
             df.to_csv(data_path, mode='a', header=False, index=False)
-    
+
     print(f"[Process {process_id}] Results saved to {data_path}")
     return df
 
@@ -388,7 +390,10 @@ def plot_results(
     df = df.astype({"batch_size": int, "kv_len": int})
 
     # Normalize mean_time to start from 0
-    # df["mean_time_normalized"] = df["mean_time_ms"] - df["mean_time_ms"].min()
+    df["mean_time_normalized"] = df["mean_time_ms"] - df["mean_time_ms"].min()
+
+    # Create kv_len_batch_size column for plotting
+    df["kv_len_batch_size"] = df["kv_len"] * df["batch_size"]
 
     # Create a subplot figure with 3 plots
     fig = make_subplots(
@@ -434,7 +439,8 @@ def plot_results(
                 mode="lines+markers",
                 name=f"kv_len={kv_len}",
                 legendgroup="plot2",
-                line=dict(color=colors[idx % len(colors)], width=2, dash="dash"),
+                line=dict(color=colors[idx %
+                          len(colors)], width=2, dash="dash"),
                 marker=dict(size=6),
                 hovertemplate="<b>KV Length:</b> %{fullData.name}<br>" +
                               "<b>Batch Size:</b> %{x}<br>" +
@@ -448,9 +454,9 @@ def plot_results(
     fig.update_yaxes(title_text="Mean Time (ms, normalized)", row=1, col=2)
 
     # Plot 3: kv_len*batch_size vs mean_time, grouped by batch_size
-    df["kv_len_batch_size"] = df["kv_len"] * df["batch_size"]
     for idx, batch_size in enumerate(sorted(df["batch_size"].unique())):
-        subset = df[df["batch_size"] == batch_size].sort_values("kv_len_batch_size")
+        subset = df[df["batch_size"] == batch_size].sort_values(
+            "kv_len_batch_size")
         fig.add_trace(
             go.Scatter(
                 x=subset["kv_len_batch_size"],
@@ -458,7 +464,8 @@ def plot_results(
                 mode="lines+markers",
                 name=f"batch_size={batch_size}",
                 legendgroup="plot3",
-                line=dict(color=colors[idx % len(colors)], width=2, dash="dot"),
+                line=dict(color=colors[idx %
+                          len(colors)], width=2, dash="dot"),
                 marker=dict(size=6),
                 hovertemplate="<b>Batch Size:</b> %{fullData.name}<br>" +
                               "<b>KV Length × Batch Size:</b> %{x}<br>" +
@@ -494,6 +501,52 @@ def plot_results(
     fig.write_html(html_path)
     print(f"Saved interactive plot: {html_path}")
 
+    # Save as PNG using matplotlib (three subplots)
+    fig_combined, axes = plt.subplots(1, 3, figsize=(18, 6))
+
+    # Plot 1: kv_len vs mean_time, grouped by batch_size
+    for batch_size in sorted(df["batch_size"].unique()):
+        subset = df[df["batch_size"] == batch_size].sort_values("kv_len")
+        axes[0].plot(subset["kv_len"], subset["mean_time_normalized"],
+                     marker="o", label=f"batch_size={batch_size}")
+    axes[0].set_xlabel("KV Length", fontsize=10)
+    axes[0].set_ylabel("Mean Time (ms, normalized)", fontsize=10)
+    axes[0].set_title("KV Length vs Mean Time (by Batch Size)", fontsize=11)
+    axes[0].legend(fontsize=8)
+    axes[0].grid(True, alpha=0.3)
+
+    # Plot 2: batch_size vs mean_time, grouped by kv_len
+    for kv_len in sorted(df["kv_len"].unique()):
+        subset = df[df["kv_len"] == kv_len].sort_values("batch_size")
+        axes[1].plot(subset["batch_size"], subset["mean_time_normalized"],
+                     marker="o", label=f"kv_len={kv_len}")
+    axes[1].set_xlabel("Batch Size", fontsize=10)
+    axes[1].set_ylabel("Mean Time (ms, normalized)", fontsize=10)
+    axes[1].set_title("Batch Size vs Mean Time (by KV Length)", fontsize=11)
+    axes[1].legend(fontsize=8)
+    axes[1].grid(True, alpha=0.3)
+
+    # Plot 3: kv_len*batch_size vs mean_time, grouped by batch_size
+    for batch_size in sorted(df["batch_size"].unique()):
+        subset = df[df["batch_size"] == batch_size].sort_values(
+            "kv_len_batch_size")
+        axes[2].plot(subset["kv_len_batch_size"], subset["mean_time_normalized"],
+                     marker="o", label=f"batch_size={batch_size}")
+    axes[2].set_xlabel("KV Length × Batch Size", fontsize=10)
+    axes[2].set_ylabel("Mean Time (ms, normalized)", fontsize=10)
+    axes[2].set_title(
+        "KV Length × Batch Size vs Mean Time (by Batch Size)", fontsize=11)
+    axes[2].legend(fontsize=8)
+    axes[2].grid(True, alpha=0.3)
+
+    plt.suptitle("Flash Attention Benchmark Results", fontsize=14, y=1.02)
+    plt.tight_layout()
+    png_path = os.path.join(
+        output_dir, f"{output_prefix}_interactive.png") if output_dir else f"{output_prefix}_interactive.png"
+    plt.savefig(png_path, dpi=300)
+    print(f"Saved PNG plot: {png_path}")
+    plt.close()
+
     # Also create individual HTML files for each plot
     # Plot 1: kv_len vs mean_time, grouped by batch_size
     fig1 = go.Figure()
@@ -527,6 +580,24 @@ def plot_results(
     fig1.write_html(plot1_path)
     print(f"Saved plot: {plot1_path}")
 
+    # Save as PNG using matplotlib
+    plt.figure(figsize=(12, 8))
+    for batch_size in sorted(df["batch_size"].unique()):
+        subset = df[df["batch_size"] == batch_size].sort_values("kv_len")
+        plt.plot(subset["kv_len"], subset["mean_time_normalized"],
+                 marker="o", label=f"batch_size={batch_size}")
+    plt.xlabel("KV Length", fontsize=12)
+    plt.ylabel("Mean Time (ms, normalized)", fontsize=12)
+    plt.title("Flash Attention: KV Length vs Mean Time (by Batch Size)", fontsize=14)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plot1_png_path = os.path.join(
+        output_dir, f"{output_prefix}_kv_len_vs_time.png") if output_dir else f"{output_prefix}_kv_len_vs_time.png"
+    plt.savefig(plot1_png_path, dpi=300)
+    print(f"Saved PNG plot: {plot1_png_path}")
+    plt.close()
+
     # Plot 2: batch_size vs mean_time, grouped by kv_len
     fig2 = go.Figure()
     for idx, kv_len in enumerate(sorted(df["kv_len"].unique())):
@@ -559,10 +630,29 @@ def plot_results(
     fig2.write_html(plot2_path)
     print(f"Saved plot: {plot2_path}")
 
+    # Save as PNG using matplotlib
+    plt.figure(figsize=(12, 8))
+    for kv_len in sorted(df["kv_len"].unique()):
+        subset = df[df["kv_len"] == kv_len].sort_values("batch_size")
+        plt.plot(subset["batch_size"], subset["mean_time_normalized"],
+                 marker="o", label=f"kv_len={kv_len}")
+    plt.xlabel("Batch Size", fontsize=12)
+    plt.ylabel("Mean Time (ms, normalized)", fontsize=12)
+    plt.title("Flash Attention: Batch Size vs Mean Time (by KV Length)", fontsize=14)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plot2_png_path = os.path.join(
+        output_dir, f"{output_prefix}_batch_size_vs_time.png") if output_dir else f"{output_prefix}_batch_size_vs_time.png"
+    plt.savefig(plot2_png_path, dpi=300)
+    print(f"Saved PNG plot: {plot2_png_path}")
+    plt.close()
+
     # Plot 3: kv_len*batch_size vs mean_time, grouped by batch_size
     fig3 = go.Figure()
     for idx, batch_size in enumerate(sorted(df["batch_size"].unique())):
-        subset = df[df["batch_size"] == batch_size].sort_values("kv_len_batch_size")
+        subset = df[df["batch_size"] == batch_size].sort_values(
+            "kv_len_batch_size")
         fig3.add_trace(
             go.Scatter(
                 x=subset["kv_len_batch_size"],
@@ -590,6 +680,26 @@ def plot_results(
         output_dir, f"{output_prefix}_kv_len_batch_size_vs_time.html") if output_dir else f"{output_prefix}_kv_len_batch_size_vs_time.html"
     fig3.write_html(plot3_path)
     print(f"Saved plot: {plot3_path}")
+
+    # Save as PNG using matplotlib
+    plt.figure(figsize=(12, 8))
+    for batch_size in sorted(df["batch_size"].unique()):
+        subset = df[df["batch_size"] == batch_size].sort_values(
+            "kv_len_batch_size")
+        plt.plot(subset["kv_len_batch_size"], subset["mean_time_normalized"],
+                 marker="o", label=f"batch_size={batch_size}")
+    plt.xlabel("KV Length × Batch Size", fontsize=12)
+    plt.ylabel("Mean Time (ms, normalized)", fontsize=12)
+    plt.title(
+        "Flash Attention: KV Length × Batch Size vs Mean Time (by Batch Size)", fontsize=14)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plot3_png_path = os.path.join(
+        output_dir, f"{output_prefix}_kv_len_batch_size_vs_time.png") if output_dir else f"{output_prefix}_kv_len_batch_size_vs_time.png"
+    plt.savefig(plot3_png_path, dpi=300)
+    print(f"Saved PNG plot: {plot3_png_path}")
+    plt.close()
 
 
 def run_benchmark_suite(
@@ -626,16 +736,22 @@ def run_benchmark_suite(
             f"Unknown model size: {model_size}. "
             f"Supported sizes: {list(QWEN3_MODEL_CONFIGS.keys())}"
         )
+    # Synchronize all processes at the start to ensure they begin together
+    if barrier:
+        barrier.wait()
+
     model_config = QWEN3_MODEL_CONFIGS[model_size]
     num_heads = model_config["num_heads"]
     head_size = model_config["head_size"]
 
-    print(f"[Process {process_id}] Starting Flash Attention Varlen Function Benchmark Suite...")
+    print(
+        f"[Process {process_id}] Starting Flash Attention Varlen Function Benchmark Suite...")
     print(f"[Process {process_id}] Model: Qwen3-{model_size}")
     print(f"[Process {process_id}]   Num heads (Q, KV): {num_heads}")
     print(f"[Process {process_id}]   Head size: {head_size}")
     print(f"[Process {process_id}] Warmup iterations: {warmup_iterations}")
-    print(f"[Process {process_id}] Benchmark iterations: {benchmark_iterations}")
+    print(
+        f"[Process {process_id}] Benchmark iterations: {benchmark_iterations}")
     print(f"[Process {process_id}] Number of processes: {num_processes}\n")
 
     torch.set_default_device("cuda")
@@ -659,36 +775,27 @@ def run_benchmark_suite(
             "soft_cap": None,
             "num_blocks": 8192,
             "sliding_window": None,
-            "fa_version": None,  # Will be auto-detected
+            "fa_version": 2,  # Fixed to 2
             "q_dtype": None,
         }
         for batch_size in batch_sizes
         for kv_len in kv_lens
     ]
 
-    # Distribute configurations across processes
+    # All processes execute the same configurations synchronously
     total_configs = len(test_configs)
-    configs_per_process = total_configs // num_processes
-    remainder = total_configs % num_processes
-    
-    # Calculate start and end indices for this process
-    start_idx = process_id * configs_per_process + min(process_id, remainder)
-    end_idx = start_idx + configs_per_process + (1 if process_id < remainder else 0)
-    
-    process_configs = test_configs[start_idx:end_idx]
-    process_total_configs = len(process_configs)
 
-    print(f"[Process {process_id}] Processing {process_total_configs} configurations "
-          f"(indices {start_idx} to {end_idx-1} out of {total_configs} total)")
+    print(f"[Process {process_id}] Processing {total_configs} configurations "
+          f"(all processes execute the same configurations synchronously)")
 
     if barrier:
         barrier.wait()  # Synchronize before starting benchmarks
 
     print(f"[Process {process_id}] Synchronized before starting benchmarks")
     all_results = []
-    for i, config in enumerate(process_configs, 1):
-        print(f"\n[Process {process_id}] Running benchmark {i}/{process_total_configs} "
-              f"(global {start_idx + i}/{total_configs})...")
+    for i, config in enumerate(test_configs, 1):
+        print(
+            f"\n[Process {process_id}] Running benchmark {i}/{total_configs}...")
 
         # Create a copy to avoid modifying the original config
         config_copy = config.copy()
@@ -698,10 +805,12 @@ def run_benchmark_suite(
         kv_len = config_copy.pop("kv_len")
         kv_lens_list = [kv_len] * batch_size
 
+        # Synchronize all processes before executing this configuration
         if barrier:
             barrier.wait()
 
-        print(f"[Process {process_id}] Synchronized before running benchmark {i}")
+        print(
+            f"[Process {process_id}] Synchronized before running benchmark {i}")
         # Run benchmark with generated kv_lens
         results = benchmark_flash_attn_varlen(
             kv_lens=kv_lens_list,
@@ -720,7 +829,7 @@ def run_benchmark_suite(
 
     # Save results to CSV (plots will be created after all processes complete)
     df = save_results_to_csv(
-        all_results, 
+        all_results,
         filename=filename,
         output_dir=output_dir,
         file_lock=file_lock,
@@ -803,12 +912,14 @@ def main():
     print("Flash Attention Varlen Function Benchmark (vLLM Compatible)")
     print("="*60)
     print(f"Model size: {args.model_size}")
-    print(f"Batch sizes: {args.batch_sizes if args.batch_sizes else 'default'}")
+    print(
+        f"Batch sizes: {args.batch_sizes if args.batch_sizes else 'default'}")
     print(f"KV lengths: {args.kv_lens if args.kv_lens else 'default'}")
     print(f"Warmup iterations: {args.warmup_iterations}")
     print(f"Benchmark iterations: {args.benchmark_iterations}")
     print(f"Number of processes: {args.num_processes}")
-    print(f"Output directory: {args.output_dir if args.output_dir else 'current directory'}")
+    print(
+        f"Output directory: {args.output_dir if args.output_dir else 'current directory'}")
     print("="*60)
 
     if args.num_processes > 1:
@@ -844,12 +955,13 @@ def main():
 
         print(f"\nAll {args.num_processes} processes completed.")
         if args.output_dir:
-            print(f"Results saved to: {os.path.join(args.output_dir, args.filename)}")
+            print(
+                f"Results saved to: {os.path.join(args.output_dir, args.filename)}")
         else:
             print(f"Results saved to: {args.filename}")
         if args.num_processes > 1:
             print(f"Note: Each process wrote to a separate file (proc0, proc1, ...)")
-        
+
         # Generate plots from combined results if not skipped
         if not args.skip_plots:
             print("\nGenerating plots from combined results...")
@@ -859,11 +971,12 @@ def main():
                 base_name = os.path.splitext(args.filename)[0]
                 ext = os.path.splitext(args.filename)[1]
                 proc_filename = f"{base_name}_proc{i}{ext}"
-                proc_path = os.path.join(args.output_dir, proc_filename) if args.output_dir else proc_filename
+                proc_path = os.path.join(
+                    args.output_dir, proc_filename) if args.output_dir else proc_filename
                 if os.path.exists(proc_path):
                     df = pd.read_csv(proc_path)
                     all_dfs.append(df)
-            
+
             if all_dfs:
                 combined_df = pd.concat(all_dfs, ignore_index=True)
                 plot_results(combined_df, output_dir=args.output_dir)
@@ -882,18 +995,19 @@ def main():
             num_processes=1,
             filename=args.filename,
         )
-        
+
         # Generate plots if not skipped
         if not args.skip_plots:
             # Load the saved CSV and create plots
-            data_path = os.path.join(args.output_dir, args.filename) if args.output_dir else args.filename
+            data_path = os.path.join(
+                args.output_dir, args.filename) if args.output_dir else args.filename
             if os.path.exists(data_path):
                 df = pd.read_csv(data_path)
                 plot_results(df, output_dir=args.output_dir)
-        
-        print(f"\nResults saved to: {os.path.join(args.output_dir, args.filename) if args.output_dir else args.filename}")
+
+        print(
+            f"\nResults saved to: {os.path.join(args.output_dir, args.filename) if args.output_dir else args.filename}")
 
 
 if __name__ == "__main__":
     main()
-

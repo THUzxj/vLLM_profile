@@ -10,6 +10,8 @@ import os
 import tempfile
 import time
 from typing import Optional
+import multiprocessing as mp
+from multiprocessing import Barrier, Lock
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -58,7 +60,7 @@ _dist_env_initialized = False
 _dist_init_temp_file = None
 
 
-def ensure_distributed_initialized():
+def ensure_distributed_initialized(process_id: int = 0):
     """Ensure distributed environment and model parallel groups are initialized."""
     global _dist_env_initialized, _dist_init_temp_file
 
@@ -67,7 +69,8 @@ def ensure_distributed_initialized():
 
     if not torch.distributed.is_initialized():
         # Create a temporary file for distributed initialization
-        _dist_init_temp_file = tempfile.mkstemp()[1]
+        # Use process_id to create unique temp files for each process
+        _dist_init_temp_file = tempfile.mkstemp(suffix=f"_proc{process_id}")[1]
 
         backend = "nccl"
         if current_platform.is_cpu() or current_platform.is_tpu():
@@ -155,6 +158,7 @@ def benchmark_qwen3_mlp(
     warmup_iterations: int = WARMUP_ITERATIONS,
     benchmark_iterations: int = BENCHMARK_ITERATIONS,
     device: str = "cuda",
+    process_id: int = 0,
 ) -> dict:
     """
     Benchmark Qwen3MLP function with given input dimensions.
@@ -173,10 +177,11 @@ def benchmark_qwen3_mlp(
         dict: Benchmark results including mean, min, max times and throughput.
     """
     # Ensure distributed environment is initialized
-    ensure_distributed_initialized()
+    ensure_distributed_initialized(process_id=process_id)
 
     # Setup
-    current_platform.seed_everything(0)
+    # Different seed for each process
+    current_platform.seed_everything(42 + process_id)
     torch.set_default_device(device)
 
     # Create MLP module
@@ -198,24 +203,35 @@ def benchmark_qwen3_mlp(
             _ = mlp(input_tensor)
 
     # Synchronize before benchmarking
-    if device == "cuda":
-        torch.cuda.synchronize()
+    torch.cuda.synchronize()
 
     # Benchmark
-    times = []
+    times = []  # Host-side timing using time.perf_counter
+    cuda_event_times = []  # Device-side timing using CUDA events
+
+    # CUDA events for more accurate GPU timing
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
     with torch.inference_mode():
         for _ in range(benchmark_iterations):
-            if device == "cuda":
-                torch.cuda.synchronize()
+            torch.cuda.synchronize()
             start_time = time.perf_counter()
+
+            # Record CUDA start event
+            start_event.record()
 
             _ = mlp(input_tensor)
 
-            if device == "cuda":
-                torch.cuda.synchronize()
+            torch.cuda.synchronize()
             end_time = time.perf_counter()
+            # Record CUDA end event and measure elapsed time (in ms)
+            end_event.record()
+            torch.cuda.synchronize()
+
             # Convert to milliseconds
             times.append((end_time - start_time) * 1000)
+            cuda_event_times.append(start_event.elapsed_time(end_event))
 
     # Calculate statistics
     times_tensor = torch.tensor(times)
@@ -224,9 +240,17 @@ def benchmark_qwen3_mlp(
     max_time = times_tensor.max().item()
     std_time = times_tensor.std().item()
 
+    # CUDA event based statistics
+    cuda_times_tensor = torch.tensor(cuda_event_times)
+    mean_time_cuda = cuda_times_tensor.mean().item()
+    min_time_cuda = cuda_times_tensor.min().item()
+    max_time_cuda = cuda_times_tensor.max().item()
+    std_time_cuda = cuda_times_tensor.std().item()
+
     # Calculate throughput (tokens per second)
     total_tokens = batch_size * seq_len
     throughput = total_tokens / (mean_time / 1000)  # tokens per second
+    throughput_cuda = total_tokens / (mean_time_cuda / 1000)  # tokens per second using CUDA timing
 
     # Calculate FLOPs (approximate)
     # gate_up_proj: batch_size * seq_len * hidden_size * intermediate_size * 2
@@ -237,14 +261,23 @@ def benchmark_qwen3_mlp(
         batch_size * seq_len * intermediate_size * hidden_size  # down_proj
     )
     tflops = flops / (mean_time / 1000) / 1e12  # TFLOPs
+    tflops_cuda = flops / (mean_time_cuda / 1000) / 1e12  # TFLOPs using CUDA timing
 
     return {
+        # Host-side timing results
         "mean_time_ms": mean_time,
         "min_time_ms": min_time,
         "max_time_ms": max_time,
         "std_time_ms": std_time,
         "throughput_tokens_per_sec": throughput,
         "tflops": tflops,
+        # CUDA event timing results
+        "mean_time_ms_cuda": mean_time_cuda,
+        "min_time_ms_cuda": min_time_cuda,
+        "max_time_ms_cuda": max_time_cuda,
+        "std_time_ms_cuda": std_time_cuda,
+        "throughput_tokens_per_sec_cuda": throughput_cuda,
+        "tflops_cuda": tflops_cuda,
         "total_tokens": total_tokens,
         "config": {
             "batch_size": batch_size,
@@ -275,13 +308,20 @@ def print_benchmark_results(results: dict):
     print(f"  Dtype: {config['dtype']}")
     print(f"  Device: {config['device']}")
     print(f"\nPerformance:")
-    print(f"  Mean time: {results['mean_time_ms']:.4f} ms")
-    print(f"  Min time:  {results['min_time_ms']:.4f} ms")
-    print(f"  Max time:  {results['max_time_ms']:.4f} ms")
-    print(f"  Std dev:   {results['std_time_ms']:.4f} ms")
+    print(f"  Mean time (host): {results['mean_time_ms']:.4f} ms")
+    print(f"  Min time  (host): {results['min_time_ms']:.4f} ms")
+    print(f"  Max time  (host): {results['max_time_ms']:.4f} ms")
+    print(f"  Std dev   (host): {results['std_time_ms']:.4f} ms")
+    print(f"  Mean time (CUDA): {results['mean_time_ms_cuda']:.4f} ms")
+    print(f"  Min time  (CUDA): {results['min_time_ms_cuda']:.4f} ms")
+    print(f"  Max time  (CUDA): {results['max_time_ms_cuda']:.4f} ms")
+    print(f"  Std dev   (CUDA): {results['std_time_ms_cuda']:.4f} ms")
     print(
-        f"  Throughput: {results['throughput_tokens_per_sec']:.2f} tokens/sec")
-    print(f"  TFLOPs: {results['tflops']:.4f}")
+        f"  Throughput (host): {results['throughput_tokens_per_sec']:.2f} tokens/sec")
+    print(
+        f"  Throughput (CUDA): {results['throughput_tokens_per_sec_cuda']:.2f} tokens/sec")
+    print(f"  TFLOPs (host): {results['tflops']:.4f}")
+    print(f"  TFLOPs (CUDA): {results['tflops_cuda']:.4f}")
     print(f"  Total tokens: {results['total_tokens']}")
     print("="*80 + "\n")
 
@@ -290,11 +330,34 @@ def save_results_to_csv(
     results: list,
     filename: str = "benchmark_qwen3_mlp_results.csv",
     output_dir: Optional[str] = None,
+    file_lock: Optional[Lock] = None,
+    process_id: int = 0,
+    barrier: Optional[Barrier] = None,
+    num_processes: int = 1,
 ):
-    """Save benchmark results to CSV file."""
+    """Save benchmark results to CSV file.
+
+    Args:
+        results: List of benchmark results
+        filename: Output CSV filename
+        output_dir: Output directory
+        file_lock: Optional multiprocessing lock for file writing
+        process_id: Process ID for multi-process mode
+        barrier: Optional multiprocessing barrier for synchronization
+        num_processes: Total number of processes
+    """
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        filename = os.path.join(output_dir, filename)
+
+    # Use process-specific log file if multiple processes
+    if num_processes > 1:
+        base_name = os.path.splitext(filename)[0]
+        ext = os.path.splitext(filename)[1]
+        data_path = os.path.join(
+            output_dir, f"{base_name}_proc{process_id}{ext}") if output_dir else f"{base_name}_proc{process_id}{ext}"
+    else:
+        data_path = os.path.join(
+            output_dir, filename) if output_dir else filename
 
     rows = []
     for result in results:
@@ -307,19 +370,45 @@ def save_results_to_csv(
             "hidden_size": config["hidden_size"],
             "intermediate_size": config["intermediate_size"],
             "dtype": config["dtype"],
+            # Host-side timing columns
             "mean_time_ms": result["mean_time_ms"],
             "min_time_ms": result["min_time_ms"],
             "max_time_ms": result["max_time_ms"],
             "std_time_ms": result["std_time_ms"],
             "throughput_tokens_per_sec": result["throughput_tokens_per_sec"],
             "tflops": result["tflops"],
+            # CUDA event timing columns
+            "mean_time_ms_cuda": result["mean_time_ms_cuda"],
+            "min_time_ms_cuda": result["min_time_ms_cuda"],
+            "max_time_ms_cuda": result["max_time_ms_cuda"],
+            "std_time_ms_cuda": result["std_time_ms_cuda"],
+            "throughput_tokens_per_sec_cuda": result["throughput_tokens_per_sec_cuda"],
+            "tflops_cuda": result["tflops_cuda"],
             "total_tokens": result["total_tokens"],
+            "process_id": process_id,
         }
         rows.append(row)
 
     df = pd.DataFrame(rows)
-    df.to_csv(filename, index=False)
-    print(f"\nResults saved to {filename}")
+
+    # Initialize CSV file with headers if it doesn't exist
+    if not os.path.exists(data_path):
+        if file_lock:
+            with file_lock:
+                # Double check after acquiring lock
+                if not os.path.exists(data_path):
+                    df.to_csv(data_path, index=False)
+        else:
+            df.to_csv(data_path, index=False)
+    else:
+        # Append to existing file
+        if file_lock:
+            with file_lock:
+                df.to_csv(data_path, mode='a', header=False, index=False)
+        else:
+            df.to_csv(data_path, mode='a', header=False, index=False)
+
+    print(f"[Process {process_id}] Results saved to {data_path}")
     return df
 
 
@@ -406,6 +495,11 @@ def run_benchmark_suite(
     model_size: str = DEFAULT_MODEL,
     warmup_iterations: int = WARMUP_ITERATIONS,
     benchmark_iterations: int = BENCHMARK_ITERATIONS,
+    barrier: Optional[Barrier] = None,
+    file_lock: Optional[Lock] = None,
+    process_id: int = 0,
+    num_processes: int = 1,
+    filename: str = "benchmark_qwen3_mlp_results.csv",
 ):
     """Run a comprehensive benchmark suite with different input sizes.
 
@@ -414,6 +508,13 @@ def run_benchmark_suite(
         seq_lens: List of sequence lengths to test. If None, uses default values.
         output_dir: Directory to save output files. If None, saves to current directory.
         model_size: Model size to use ("0.6B", "4B", or "32B"). Defaults to "4B".
+        warmup_iterations: Number of warmup iterations.
+        benchmark_iterations: Number of benchmark iterations.
+        barrier: Optional multiprocessing barrier for synchronization.
+        file_lock: Optional multiprocessing lock for file writing.
+        process_id: Process ID for multi-process mode.
+        num_processes: Total number of processes.
+        filename: Output CSV filename.
     """
     # Get model configuration
     if model_size not in QWEN3_MODEL_CONFIGS:
@@ -421,14 +522,22 @@ def run_benchmark_suite(
             f"Unknown model size: {model_size}. "
             f"Supported sizes: {list(QWEN3_MODEL_CONFIGS.keys())}"
         )
+    # Synchronize all processes at the start to ensure they begin together
+    if barrier:
+        barrier.wait()
+
     model_config = QWEN3_MODEL_CONFIGS[model_size]
 
-    print("Starting Qwen3MLP Benchmark Suite...")
-    print(f"Model: Qwen3-{model_size}")
-    print(f"  Hidden size: {model_config['hidden_size']}")
-    print(f"  Intermediate size: {model_config['intermediate_size']}")
-    print(f"Warmup iterations: {warmup_iterations}")
-    print(f"Benchmark iterations: {benchmark_iterations}\n")
+    print(f"[Process {process_id}] Starting Qwen3MLP Benchmark Suite...")
+    print(f"[Process {process_id}] Model: Qwen3-{model_size}")
+    print(
+        f"[Process {process_id}]   Hidden size: {model_config['hidden_size']}")
+    print(
+        f"[Process {process_id}]   Intermediate size: {model_config['intermediate_size']}")
+    print(f"[Process {process_id}] Warmup iterations: {warmup_iterations}")
+    print(
+        f"[Process {process_id}] Benchmark iterations: {benchmark_iterations}")
+    print(f"[Process {process_id}] Number of processes: {num_processes}\n")
 
     # Use the selected model configuration
     model_configs = [model_config]
@@ -449,16 +558,30 @@ def run_benchmark_suite(
 
     dtype = torch.bfloat16
 
+    # All processes execute the same configurations synchronously
+    total_configs = len(input_configs)
+
+    print(f"[Process {process_id}] Processing {total_configs} configurations "
+          f"(all processes execute the same configurations synchronously)")
+
+    if barrier:
+        barrier.wait()  # Synchronize before starting benchmarks
+
+    print(f"[Process {process_id}] Synchronized before starting benchmarks")
     all_results = []
     for model_idx, model_config in enumerate(model_configs, 1):
-        print(f"\n{'='*80}")
-        print(f"Model Config {model_idx}/{len(model_configs)}: "
+        print(f"\n[Process {process_id}] {'='*80}")
+        print(f"[Process {process_id}] Model Config {model_idx}/{len(model_configs)}: "
               f"hidden_size={model_config['hidden_size']}, "
               f"intermediate_size={model_config['intermediate_size']}")
-        print(f"{'='*80}\n")
+        print(f"[Process {process_id}] {'='*80}\n")
 
         for input_idx, (batch_size, seq_len) in enumerate(input_configs, 1):
-            print(f"Running benchmark {input_idx}/{len(input_configs)}: "
+            # Synchronize all processes before executing this configuration
+            if barrier:
+                barrier.wait()
+
+            print(f"[Process {process_id}] Running benchmark {input_idx}/{total_configs}: "
                   f"batch_size={batch_size}, seq_len={seq_len}...")
 
             try:
@@ -470,11 +593,13 @@ def run_benchmark_suite(
                     dtype=dtype,
                     warmup_iterations=warmup_iterations,
                     benchmark_iterations=benchmark_iterations,
+                    process_id=process_id,
                 )
                 all_results.append(results)
                 print_benchmark_results(results)
             except Exception as e:
-                print(f"ERROR: Failed to run benchmark: {e}\n")
+                print(
+                    f"[Process {process_id}] ERROR: Failed to run benchmark: {e}\n")
                 import traceback
                 print(traceback.format_exc())
                 all_results.append({"error": str(e), "config": {
@@ -483,9 +608,16 @@ def run_benchmark_suite(
                     **model_config
                 }})
 
-    # Save results to CSV and create plots
-    df = save_results_to_csv(all_results, output_dir=output_dir)
-    plot_results(df, output_dir=output_dir)
+    # Save results to CSV (plots will be created after all processes complete)
+    df = save_results_to_csv(
+        all_results,
+        filename=filename,
+        output_dir=output_dir,
+        file_lock=file_lock,
+        process_id=process_id,
+        barrier=barrier,
+        num_processes=num_processes
+    )
 
     # Clean up distributed environment
     cleanup_distributed()
@@ -553,17 +685,124 @@ if __name__ == "__main__":
         default=BENCHMARK_ITERATIONS,
         help=f"Number of benchmark iterations. Default: {BENCHMARK_ITERATIONS}",
     )
+    parser.add_argument(
+        "--num-processes",
+        type=int,
+        default=1,
+        help="Number of processes to run in parallel. Default: 1",
+    )
+    parser.add_argument(
+        "--filename",
+        type=str,
+        default="benchmark_qwen3_mlp_results.csv",
+        help="Output CSV filename. Default: benchmark_qwen3_mlp_results.csv",
+    )
+    parser.add_argument(
+        "--skip-plots",
+        action="store_true",
+        help="Skip generating plots (useful for multi-process mode)",
+    )
     args = parser.parse_args()
 
-    # Run comprehensive benchmark suite
-    results = run_benchmark_suite(
-        batch_sizes=args.batch_sizes,
-        seq_lens=args.seq_lens,
-        output_dir=args.output_dir,
-        model_size=args.model_size,
-        warmup_iterations=args.warmup_iterations,
-        benchmark_iterations=args.benchmark_iterations,
-    )
+    print("="*60)
+    print("Qwen3MLP Benchmark")
+    print("="*60)
+    print(f"Model size: {args.model_size}")
+    print(
+        f"Batch sizes: {args.batch_sizes if args.batch_sizes else 'default'}")
+    print(f"Sequence lengths: {args.seq_lens if args.seq_lens else 'default'}")
+    print(f"Warmup iterations: {args.warmup_iterations}")
+    print(f"Benchmark iterations: {args.benchmark_iterations}")
+    print(f"Number of processes: {args.num_processes}")
+    print(
+        f"Output directory: {args.output_dir if args.output_dir else 'current directory'}")
+    print("="*60)
+
+    if args.num_processes > 1:
+        # Create barrier and lock for multiprocessing
+        barrier = Barrier(args.num_processes)
+        file_lock = Lock()
+
+        # Create and start processes
+        processes = []
+        for i in range(args.num_processes):
+            p = mp.Process(
+                target=run_benchmark_suite,
+                args=(
+                    args.batch_sizes,
+                    args.seq_lens,
+                    args.output_dir,
+                    args.model_size,
+                    args.warmup_iterations,
+                    args.benchmark_iterations,
+                    barrier,
+                    file_lock,
+                    i,
+                    args.num_processes,
+                    args.filename,
+                )
+            )
+            p.start()
+            processes.append(p)
+
+        # Wait for all processes to complete
+        for p in processes:
+            p.join()
+
+        print(f"\nAll {args.num_processes} processes completed.")
+        if args.output_dir:
+            print(
+                f"Results saved to: {os.path.join(args.output_dir, args.filename)}")
+        else:
+            print(f"Results saved to: {args.filename}")
+        if args.num_processes > 1:
+            print(f"Note: Each process wrote to a separate file (proc0, proc1, ...)")
+
+        # Generate plots from combined results if not skipped
+        if not args.skip_plots:
+            print("\nGenerating plots from combined results...")
+            # Collect all results from process-specific files
+            all_dfs = []
+            for i in range(args.num_processes):
+                base_name = os.path.splitext(args.filename)[0]
+                ext = os.path.splitext(args.filename)[1]
+                proc_filename = f"{base_name}_proc{i}{ext}"
+                proc_path = os.path.join(
+                    args.output_dir, proc_filename) if args.output_dir else proc_filename
+                if os.path.exists(proc_path):
+                    df = pd.read_csv(proc_path)
+                    all_dfs.append(df)
+
+            if all_dfs:
+                combined_df = pd.concat(all_dfs, ignore_index=True)
+                plot_results(combined_df, output_dir=args.output_dir)
+    else:
+        # Single process mode
+        results = run_benchmark_suite(
+            batch_sizes=args.batch_sizes,
+            seq_lens=args.seq_lens,
+            output_dir=args.output_dir,
+            model_size=args.model_size,
+            warmup_iterations=args.warmup_iterations,
+            benchmark_iterations=args.benchmark_iterations,
+            barrier=None,
+            file_lock=None,
+            process_id=0,
+            num_processes=1,
+            filename=args.filename,
+        )
+
+        # Generate plots if not skipped
+        if not args.skip_plots:
+            # Load the saved CSV and create plots
+            data_path = os.path.join(
+                args.output_dir, args.filename) if args.output_dir else args.filename
+            if os.path.exists(data_path):
+                df = pd.read_csv(data_path)
+                plot_results(df, output_dir=args.output_dir)
+
+        print(
+            f"\nResults saved to: {os.path.join(args.output_dir, args.filename) if args.output_dir else args.filename}")
 
     # You can also run a single benchmark
     # Example:
