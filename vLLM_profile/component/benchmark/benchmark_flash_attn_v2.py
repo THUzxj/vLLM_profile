@@ -13,6 +13,7 @@ import time
 from typing import Optional
 import multiprocessing as mp
 from multiprocessing import Barrier, Lock
+from typing import Any
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -20,6 +21,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 import torch
+import yaml
 
 from vllm.platforms import current_platform
 from vllm.attention.utils.fa_utils import (
@@ -78,6 +80,7 @@ def benchmark_flash_attn_varlen(
     warmup_iterations: int = WARMUP_ITERATIONS,
     benchmark_iterations: int = BENCHMARK_ITERATIONS,
     process_id: int = 0,
+    barrier: Optional[Barrier] = None,
 ) -> dict:
     """
     Benchmark flash_attn_varlen_func function (compatible with latest vLLM).
@@ -193,6 +196,12 @@ def benchmark_flash_attn_varlen(
             v_descale=v_descale,
         )
 
+    # If in multi-process mode, synchronize all processes before starting benchmark
+    if barrier is not None:
+        barrier.wait()
+
+    total_time_start = time.perf_counter()
+
     # Synchronize before benchmarking
     torch.cuda.synchronize()
 
@@ -226,6 +235,12 @@ def benchmark_flash_attn_varlen(
         end_time = time.perf_counter()
         times.append((end_time - start_time) * 1000)  # Convert to milliseconds
 
+
+    if barrier is not None:
+        barrier.wait()
+    total_time_end = time.perf_counter()
+    total_time = (total_time_end - total_time_start) * 1000
+
     # Calculate statistics
     times_tensor = torch.tensor(times)
     mean_time = times_tensor.mean().item()
@@ -238,6 +253,7 @@ def benchmark_flash_attn_varlen(
     throughput = total_tokens / (mean_time / 1000)  # tokens per second
 
     return {
+        "total_time_ms": total_time,
         "mean_time_ms": mean_time,
         "min_time_ms": min_time,
         "max_time_ms": max_time,
@@ -289,6 +305,7 @@ def print_benchmark_results(results: dict):
     print(f"  Min time:  {results['min_time_ms']:.4f} ms")
     print(f"  Max time:  {results['max_time_ms']:.4f} ms")
     print(f"  Std dev:   {results['std_time_ms']:.4f} ms")
+    print(f"  Total time: {results['total_time_ms']:.4f} ms")
     print(
         f"  Throughput: {results['throughput_tokens_per_sec']:.2f} tokens/sec")
     print(f"  Total tokens: {results['total_tokens']}")
@@ -303,6 +320,7 @@ def save_results_to_csv(
     process_id: int = 0,
     barrier: Optional[Barrier] = None,
     num_processes: int = 1,
+    gpu_percentage: Optional[int] = None,
 ):
     """Save benchmark results to CSV file.
 
@@ -314,6 +332,7 @@ def save_results_to_csv(
         process_id: Process ID for multi-process mode
         barrier: Optional multiprocessing barrier for synchronization
         num_processes: Total number of processes
+        gpu_percentage: GPU resource allocation percentage for this process
     """
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -347,9 +366,11 @@ def save_results_to_csv(
             "min_time_ms": result["min_time_ms"],
             "max_time_ms": result["max_time_ms"],
             "std_time_ms": result["std_time_ms"],
+            "total_time_ms": result["total_time_ms"],
             "throughput_tokens_per_sec": result["throughput_tokens_per_sec"],
             "total_tokens": result["total_tokens"],
             "process_id": process_id,
+            "gpu_percentage": gpu_percentage if gpu_percentage is not None else "",
         }
         rows.append(row)
 
@@ -714,6 +735,7 @@ def run_benchmark_suite(
     process_id: int = 0,
     num_processes: int = 1,
     filename: str = "benchmark_flash_attn_v2_results.csv",
+    gpu_percentage: Optional[int] = None,
 ):
     """Run a comprehensive benchmark suite.
 
@@ -729,6 +751,7 @@ def run_benchmark_suite(
         process_id: Process ID for multi-process mode.
         num_processes: Total number of processes.
         filename: Output CSV filename.
+        gpu_percentage: GPU resource allocation percentage for this process.
     """
     # Get model configuration
     if model_size not in QWEN3_MODEL_CONFIGS:
@@ -817,6 +840,7 @@ def run_benchmark_suite(
             warmup_iterations=warmup_iterations,
             benchmark_iterations=benchmark_iterations,
             process_id=process_id,
+            barrier=barrier,
             **config_copy)
 
         # Add batch_size and kv_len to results config
@@ -835,10 +859,123 @@ def run_benchmark_suite(
         file_lock=file_lock,
         process_id=process_id,
         barrier=barrier,
-        num_processes=num_processes
+        num_processes=num_processes,
+        gpu_percentage=gpu_percentage
     )
 
     return all_results
+
+
+def _load_yaml_config(config_path: str) -> dict[str, Any]:
+    with open(config_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"YAML config must be a mapping/dict, got: {type(data)}")
+    return data
+
+
+def _get_process_sweep_from_yaml(
+    yaml_cfg: dict[str, Any],
+    process_id: int,
+    cli_batch_sizes: Optional[list[int]],
+    cli_kv_lens: Optional[list[int]],
+) -> tuple[Optional[list[int]], Optional[list[int]]]:
+    """
+    Resolve (batch_sizes, kv_lens) for a given process.
+
+    Priority:
+      1) YAML per-process override
+      2) YAML default
+      3) CLI args (which may be None -> fall back to run_benchmark_suite defaults)
+
+    Supported YAML shapes:
+      - default: {batch_sizes: [...], kv_lens: [...]}
+        processes:
+          - id: 0
+            batch_sizes: [...]
+            kv_lens: [...]
+          - id: 1
+            ...
+
+      - default: ...
+        process_overrides:
+          "0": {batch_sizes: [...], kv_lens: [...]}
+          "1": {batch_sizes: [...], kv_lens: [...]}
+    """
+    default_cfg = yaml_cfg.get("default", {}) if isinstance(yaml_cfg.get("default", {}), dict) else {}
+
+    batch_sizes: Optional[list[int]] = default_cfg.get("batch_sizes", cli_batch_sizes)
+    kv_lens: Optional[list[int]] = default_cfg.get("kv_lens", cli_kv_lens)
+
+    # dict-style overrides
+    proc_overrides = yaml_cfg.get("process_overrides", None)
+    if isinstance(proc_overrides, dict):
+        p = proc_overrides.get(str(process_id), proc_overrides.get(process_id))
+        if isinstance(p, dict):
+            if "batch_sizes" in p:
+                batch_sizes = p["batch_sizes"]
+            if "kv_lens" in p:
+                kv_lens = p["kv_lens"]
+
+    # list-style overrides
+    procs_list = yaml_cfg.get("processes", None)
+    if isinstance(procs_list, list):
+        for p in procs_list:
+            if not isinstance(p, dict):
+                continue
+            if p.get("id") == process_id:
+                if "batch_sizes" in p:
+                    batch_sizes = p["batch_sizes"]
+                if "kv_lens" in p:
+                    kv_lens = p["kv_lens"]
+                break
+
+    # Basic validation if provided
+    def _validate_int_list(name: str, v: Any) -> Optional[list[int]]:
+        if v is None:
+            return None
+        if not isinstance(v, list) or not all(isinstance(x, int) for x in v):
+            raise ValueError(f"{name} must be a list[int] or null, got: {v!r}")
+        return v
+
+    return _validate_int_list("batch_sizes", batch_sizes), _validate_int_list("kv_lens", kv_lens)
+
+
+def _process_worker(
+    *,
+    batch_sizes: Optional[list[int]],
+    kv_lens: Optional[list[int]],
+    output_dir: Optional[str],
+    model_size: str,
+    warmup_iterations: int,
+    benchmark_iterations: int,
+    barrier: Optional[Barrier],
+    file_lock: Optional[Lock],
+    process_id: int,
+    num_processes: int,
+    filename: str,
+    process_gpu_percentage: Optional[int],
+):
+    # NOTE: multiprocessing.Process doesn't support env=...; set env in the child process.
+    if process_gpu_percentage is not None:
+        os.environ["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = str(process_gpu_percentage)
+
+    run_benchmark_suite(
+        batch_sizes=batch_sizes,
+        kv_lens=kv_lens,
+        output_dir=output_dir,
+        model_size=model_size,
+        warmup_iterations=warmup_iterations,
+        benchmark_iterations=benchmark_iterations,
+        barrier=barrier,
+        file_lock=file_lock,
+        process_id=process_id,
+        num_processes=num_processes,
+        filename=filename,
+        gpu_percentage=process_gpu_percentage,
+    )
 
 
 def main():
@@ -906,6 +1043,18 @@ def main():
         action="store_true",
         help="Skip generating plots (useful for multi-process mode)",
     )
+    parser.add_argument(
+        "--config-yaml",
+        type=str,
+        default=None,
+        help="YAML config file to define default + per-process sweep parameters "
+        "(e.g., different batch_sizes/kv_lens per process).",
+    )
+
+
+    # Process GPU resource allocation
+    parser.add_argument('--process-gpu-percentage', type=int, nargs='+', default=None,
+                        help='GPU resource allocation percentage for each process (list of integers)')
     args = parser.parse_args()
 
     print("="*60)
@@ -920,93 +1069,94 @@ def main():
     print(f"Number of processes: {args.num_processes}")
     print(
         f"Output directory: {args.output_dir if args.output_dir else 'current directory'}")
+    if args.process_gpu_percentage is not None:
+        print(f"GPU Percentage Per Process: {args.process_gpu_percentage}")
     print("="*60)
 
-    if args.num_processes > 1:
-        # Create barrier and lock for multiprocessing
-        barrier = Barrier(args.num_processes)
-        file_lock = Lock()
+    yaml_cfg: dict[str, Any] = {}
+    if args.config_yaml:
+        yaml_cfg = _load_yaml_config(args.config_yaml)
 
-        # Create and start processes
-        processes = []
-        for i in range(args.num_processes):
-            p = mp.Process(
-                target=run_benchmark_suite,
-                args=(
-                    args.batch_sizes,
-                    args.kv_lens,
-                    args.output_dir,
-                    args.model_size,
-                    args.warmup_iterations,
-                    args.benchmark_iterations,
-                    barrier,
-                    file_lock,
-                    i,
-                    args.num_processes,
-                    args.filename,
-                )
+    # Validate GPU percentage configuration
+    if args.process_gpu_percentage is not None:
+        if len(args.process_gpu_percentage) != args.num_processes:
+            raise ValueError(
+                f"process_gpu_percentage length ({len(args.process_gpu_percentage)}) must match "
+                f"num_processes ({args.num_processes})"
             )
-            p.start()
-            processes.append(p)
 
-        # Wait for all processes to complete
-        for p in processes:
-            p.join()
+    # Create barrier and lock for multiprocessing (unified for both single and multi-process)
+    barrier = Barrier(args.num_processes) if args.num_processes > 1 else None
+    file_lock = Lock() if args.num_processes > 1 else None
 
-        print(f"\nAll {args.num_processes} processes completed.")
-        if args.output_dir:
-            print(
-                f"Results saved to: {os.path.join(args.output_dir, args.filename)}")
-        else:
-            print(f"Results saved to: {args.filename}")
-        if args.num_processes > 1:
-            print(f"Note: Each process wrote to a separate file (proc0, proc1, ...)")
+    # Create and start processes (unified execution path)
+    processes = []
+    for i in range(args.num_processes):
+        proc_batch_sizes, proc_kv_lens = _get_process_sweep_from_yaml(
+            yaml_cfg=yaml_cfg,
+            process_id=i,
+            cli_batch_sizes=args.batch_sizes,
+            cli_kv_lens=args.kv_lens,
+        )
+        proc_gpu_pct = (
+            args.process_gpu_percentage[i]
+            if args.process_gpu_percentage is not None
+            else None
+        )
+        p = mp.Process(
+            target=_process_worker,
+            kwargs={
+                "batch_sizes": proc_batch_sizes,
+                "kv_lens": proc_kv_lens,
+                "output_dir": args.output_dir,
+                "model_size": args.model_size,
+                "warmup_iterations": args.warmup_iterations,
+                "benchmark_iterations": args.benchmark_iterations,
+                "barrier": barrier,
+                "file_lock": file_lock,
+                "process_id": i,
+                "num_processes": args.num_processes,
+                "filename": args.filename,
+                "process_gpu_percentage": proc_gpu_pct,
+            },
+        )
+        p.start()
+        processes.append(p)
 
-        # Generate plots from combined results if not skipped
-        if not args.skip_plots:
-            print("\nGenerating plots from combined results...")
-            # Collect all results from process-specific files
-            all_dfs = []
-            for i in range(args.num_processes):
+    # Wait for all processes to complete
+    for p in processes:
+        p.join()
+
+    print(f"\nAll {args.num_processes} process(es) completed.")
+    if args.output_dir:
+        print(
+            f"Results saved to: {os.path.join(args.output_dir, args.filename)}")
+    else:
+        print(f"Results saved to: {args.filename}")
+    if args.num_processes > 1:
+        print(f"Note: Each process wrote to a separate file (proc0, proc1, ...)")
+
+    # Generate plots from combined results if not skipped
+    if not args.skip_plots:
+        print("\nGenerating plots from combined results...")
+        # Collect all results from process-specific files
+        all_dfs = []
+        for i in range(args.num_processes):
+            if args.num_processes > 1:
                 base_name = os.path.splitext(args.filename)[0]
                 ext = os.path.splitext(args.filename)[1]
                 proc_filename = f"{base_name}_proc{i}{ext}"
-                proc_path = os.path.join(
-                    args.output_dir, proc_filename) if args.output_dir else proc_filename
-                if os.path.exists(proc_path):
-                    df = pd.read_csv(proc_path)
-                    all_dfs.append(df)
+            else:
+                proc_filename = args.filename
+            proc_path = os.path.join(
+                args.output_dir, proc_filename) if args.output_dir else proc_filename
+            if os.path.exists(proc_path):
+                df = pd.read_csv(proc_path)
+                all_dfs.append(df)
 
-            if all_dfs:
-                combined_df = pd.concat(all_dfs, ignore_index=True)
-                plot_results(combined_df, output_dir=args.output_dir)
-    else:
-        # Single process mode
-        results = run_benchmark_suite(
-            batch_sizes=args.batch_sizes,
-            kv_lens=args.kv_lens,
-            output_dir=args.output_dir,
-            model_size=args.model_size,
-            warmup_iterations=args.warmup_iterations,
-            benchmark_iterations=args.benchmark_iterations,
-            barrier=None,
-            file_lock=None,
-            process_id=0,
-            num_processes=1,
-            filename=args.filename,
-        )
-
-        # Generate plots if not skipped
-        if not args.skip_plots:
-            # Load the saved CSV and create plots
-            data_path = os.path.join(
-                args.output_dir, args.filename) if args.output_dir else args.filename
-            if os.path.exists(data_path):
-                df = pd.read_csv(data_path)
-                plot_results(df, output_dir=args.output_dir)
-
-        print(
-            f"\nResults saved to: {os.path.join(args.output_dir, args.filename) if args.output_dir else args.filename}")
+        if all_dfs:
+            combined_df = pd.concat(all_dfs, ignore_index=True)
+            plot_results(combined_df, output_dir=args.output_dir)
 
 
 if __name__ == "__main__":

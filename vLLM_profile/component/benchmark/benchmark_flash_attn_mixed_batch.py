@@ -16,9 +16,11 @@ import pandas as pd
 import torch
 
 from vllm.platforms import current_platform
-from vllm.vllm_flash_attn.flash_attn_interface import (fa_version_unsupported_reason,
-                                  flash_attn_with_kvcache,
-                                  is_fa_version_supported)
+from vllm.attention.utils.fa_utils import (
+    flash_attn_varlen_func,
+    get_flash_attn_version,
+    is_flash_attn_varlen_func_available,
+)
 
 # Qwen3 model configurations
 QWEN3_MODEL_CONFIGS = {
@@ -68,7 +70,11 @@ def parse_kv_len_counts(kv_len_counts_str: list[str]) -> dict[int, int]:
                 raise ValueError(f"Count must be positive, got {count}")
             if kv_len <= 0:
                 raise ValueError(f"KV length must be positive, got {kv_len}")
-            kv_len_counts[kv_len] = count
+
+            if kv_len in kv_len_counts:
+                kv_len_counts[kv_len] += count
+            else:
+                kv_len_counts[kv_len] = count
         except ValueError as e:
             raise ValueError(
                 f"Invalid format '{item}'. Expected format: 'kv_len:count' (e.g., '1024:5'). "
@@ -118,12 +124,19 @@ def benchmark_flash_attn_with_kvcache(
     Returns:
         dict: Benchmark results including mean, min, max times and throughput.
     """
-    # Check if FA version is supported
-    if not is_fa_version_supported(fa_version):
+    # Check if flash attention varlen function is available
+    if not is_flash_attn_varlen_func_available():
         return {
-            "error": f"Flash attention version {fa_version} not supported: "
-            f"{fa_version_unsupported_reason(fa_version)}"
+            "error": "Flash attention varlen function is not available on this platform"
         }
+
+    # Get FA version if not specified (kept for parity with benchmark_flash_attn_v2)
+    if fa_version is None:
+        fa_version = get_flash_attn_version()
+        if fa_version is None:
+            return {
+                "error": "Flash attention version could not be determined"
+            }
 
     if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
         return {
@@ -139,37 +152,52 @@ def benchmark_flash_attn_with_kvcache(
     assert num_query_heads % num_kv_heads == 0
     max_kv_len = max(kv_lens)
     scale = head_size**-0.5
-    window_size = ((sliding_window - 1, 0) if sliding_window is not None else
-                   (-1, -1))
+    window_size = (
+        [sliding_window - 1, 0] if sliding_window is not None else None
+    )
 
     # Create tensors
-    query = torch.randn(num_seqs, num_query_heads, head_size, dtype=dtype)
-    key_cache = torch.randn(num_blocks,
-                            block_size,
-                            num_kv_heads,
-                            head_size,
-                            dtype=dtype)
+    # For decode, each sequence has query_len=1
+    query_len = 1
+    num_tokens = num_seqs * query_len
+    # Query shape: (num_tokens, num_query_heads, head_size)
+    query = torch.randn(num_tokens, num_query_heads, head_size, dtype=dtype)
+
+    # KV cache shape: (num_blocks, block_size, num_kv_heads, head_size)
+    key_cache = torch.randn(
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype=dtype,
+    )
     value_cache = torch.randn_like(key_cache)
-    kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int32)
+    seqused_k = torch.tensor(kv_lens, dtype=torch.int32)
+
+    # cu_seqlens_q: cumulative sequence lengths for queries
+    # Shape: (num_seqs + 1,)
+    # For decode with query_len=1, this is simply [0, 1, 2, ..., num_seqs]
+    cu_seqlens_q = torch.arange(num_seqs + 1, dtype=torch.int32)
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
-    block_tables = torch.randint(0,
-                                 num_blocks,
-                                 (num_seqs, max_num_blocks_per_seq),
-                                 dtype=torch.int32)
+    block_tables = torch.randint(
+        0,
+        num_blocks,
+        (num_seqs, max_num_blocks_per_seq),
+        dtype=torch.int32,
+    )
 
-    q = query.unsqueeze(1)
-    out = torch.empty_like(q) if use_out else None
+    out = torch.empty_like(query) if use_out else None
 
     # Handle quantization
-    maybe_quantized_query = q
+    maybe_quantized_query = query
     maybe_quantized_key_cache = key_cache
     maybe_quantized_value_cache = value_cache
     q_descale = None
     k_descale = None
     v_descale = None
     if q_dtype is not None:
-        maybe_quantized_query = q.to(q_dtype)
+        maybe_quantized_query = query.to(q_dtype)
         maybe_quantized_key_cache = key_cache.to(q_dtype)
         maybe_quantized_value_cache = value_cache.to(q_dtype)
 
@@ -180,23 +208,28 @@ def benchmark_flash_attn_with_kvcache(
 
     # Warmup
     for _ in range(warmup_iterations):
-        _ = flash_attn_with_kvcache(
+        _ = flash_attn_varlen_func(
             q=maybe_quantized_query,
-            k_cache=maybe_quantized_key_cache,
-            v_cache=maybe_quantized_value_cache,
+            k=maybe_quantized_key_cache,
+            v=maybe_quantized_value_cache,
             out=out,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=query_len,
+            seqused_k=seqused_k,
+            max_seqlen_k=max_kv_len,
             softmax_scale=scale,
             causal=True,
-            block_table=block_tables,
-            cache_seqlens=kv_lens_tensor,
-            softcap=soft_cap if soft_cap is not None else 0,
             window_size=window_size,
+            block_table=block_tables,
+            softcap=soft_cap if soft_cap is not None else 0,
             fa_version=fa_version,
             q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
         )
 
+
+    total_time_start = time.perf_counter()
     # Synchronize before benchmarking
     torch.cuda.synchronize()
 
@@ -206,17 +239,20 @@ def benchmark_flash_attn_with_kvcache(
         torch.cuda.synchronize()
         start_time = time.perf_counter()
 
-        _ = flash_attn_with_kvcache(
+        _ = flash_attn_varlen_func(
             q=maybe_quantized_query,
-            k_cache=maybe_quantized_key_cache,
-            v_cache=maybe_quantized_value_cache,
+            k=maybe_quantized_key_cache,
+            v=maybe_quantized_value_cache,
             out=out,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=query_len,
+            seqused_k=seqused_k,
+            max_seqlen_k=max_kv_len,
             softmax_scale=scale,
             causal=True,
-            block_table=block_tables,
-            cache_seqlens=kv_lens_tensor,
-            softcap=soft_cap if soft_cap is not None else 0,
             window_size=window_size,
+            block_table=block_tables,
+            softcap=soft_cap if soft_cap is not None else 0,
             fa_version=fa_version,
             q_descale=q_descale,
             k_descale=k_descale,
@@ -226,6 +262,9 @@ def benchmark_flash_attn_with_kvcache(
         torch.cuda.synchronize()
         end_time = time.perf_counter()
         times.append((end_time - start_time) * 1000)  # Convert to milliseconds
+
+    total_time_end = time.perf_counter()
+    total_time = (total_time_end - total_time_start) * 1000
 
     # Calculate statistics
     times_tensor = torch.tensor(times)
@@ -239,6 +278,7 @@ def benchmark_flash_attn_with_kvcache(
     throughput = total_tokens / (mean_time / 1000)  # tokens per second
 
     return {
+        "total_time_ms": total_time,
         "mean_time_ms": mean_time,
         "min_time_ms": min_time,
         "max_time_ms": max_time,
@@ -342,6 +382,7 @@ def save_results_to_csv(
             "min_time_ms": result["min_time_ms"],
             "max_time_ms": result["max_time_ms"],
             "std_time_ms": result["std_time_ms"],
+            "total_time_ms": result["total_time_ms"],
             "throughput_tokens_per_sec": result["throughput_tokens_per_sec"],
             "total_tokens": result["total_tokens"],
         }
@@ -427,7 +468,8 @@ def run_benchmark_suite(
     soft_cap: Optional[float] = None,
     num_blocks: int = 8192,
     sliding_window: Optional[int] = None,
-    fa_version: int = 3,
+    # Default to FA v2 to match benchmark_flash_attn_v2.py behavior
+    fa_version: int = 2,
     q_dtype: Optional[torch.dtype] = None,
     warmup_iterations: int = WARMUP_ITERATIONS,
     benchmark_iterations: int = BENCHMARK_ITERATIONS,
@@ -645,9 +687,10 @@ Examples:
     parser.add_argument(
         "--fa-version",
         type=int,
-        default=3,
+        # Default to 2 to match benchmark_flash_attn_v2.py
+        default=2,
         choices=[2, 3],
-        help="Flash attention version. Options: 2, 3. Default: 3",
+        help="Flash attention version. Options: 2, 3. Default: 2",
     )
     parser.add_argument(
         "--warmup-iterations",
