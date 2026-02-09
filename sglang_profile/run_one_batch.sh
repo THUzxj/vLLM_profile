@@ -21,11 +21,11 @@ EP=2
 TP=2
 
 # Input Config
-BS="1 2 4 8 16 32 64"
-IL=1000
+BS="1 2 4 8 16 32 64 128"
+IL=10
 OL=4
 
-python bench_one_batch.py \
+python bench_one_batch_058.py \
     --model-path $MODEL_PATH \
     --batch $BS --input-len $IL --output-len $OL \
     --dp $DP --ep $EP --tp $TP --enable-dp-attention \

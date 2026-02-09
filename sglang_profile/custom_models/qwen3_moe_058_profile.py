@@ -55,7 +55,10 @@ from sglang.srt.layers.moe import (
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
-from sglang.srt.layers.moe.utils import RoutingMethodType
+from sglang.srt.layers.moe.utils import (
+    RoutingMethodType,
+    filter_moe_weight_param_global_expert,
+)
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding, get_rope
@@ -166,8 +169,7 @@ def compute_yarn_parameters(
     def find_correction_dim(num_rotations, dim, base, max_position_embeddings):
         """Inverse dimension formula to find the dimension based on the number of rotations"""
         return (
-            dim * math.log(max_position_embeddings /
-                           (num_rotations * 2 * math.pi))
+            dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi))
         ) / (2 * math.log(base))
 
     def find_correction_range(
@@ -175,8 +177,7 @@ def compute_yarn_parameters(
     ):
         """Find dimension range bounds based on rotations"""
         low = find_correction_dim(low_rot, dim, base, max_position_embeddings)
-        high = find_correction_dim(
-            high_rot, dim, base, max_position_embeddings)
+        high = find_correction_dim(high_rot, dim, base, max_position_embeddings)
         if truncate:
             low = math.floor(low)
             high = math.ceil(high)
@@ -265,15 +266,15 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             self.top_k = config.num_experts_per_tok
 
         # Save num_experts_per_tok for expert activation statistics
-        self.num_experts_per_tok = config.num_experts_per_tok  # [ZXJ]
-        self.n_routed_experts = config.num_experts  # [ZXJ]
+        self.num_experts_per_tok = config.num_experts_per_tok
+        self.n_routed_experts = config.num_experts
 
-        self.count = 0  # [ZXJ]
+        # For expert profiling
+        self.count = 0
         self.profile_component_output_dir = os.getenv(
             "PROFILE_COMPONENT_OUTPUT_DIR", None
-        )  # [ZXJ]
-        self.enable_log_expert = os.getenv(
-            "ENABLE_LOG_EXPERT", "0") == "1"  # [ZXJ]
+        )
+        self.enable_log_expert = os.getenv("ENABLE_LOG_EXPERT", "0") == "1"
 
     def forward(
         self,
@@ -298,34 +299,32 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             x.data
             for name, x in self.experts.named_parameters()
             if name not in ["correction_bias"]
+            and filter_moe_weight_param_global_expert(
+                name, x, self.experts.num_local_experts
+            )
         ]
 
-    # a new function for expert statisitcs [ZXJ]
     def get_expert_statistics(self, router_logits, times):
         """Calculate activated expert statistics."""
         # router_logits: (num_tokens, n_experts)
         # Select top-k experts for each token
         top_k = self.num_experts_per_tok
-        topk_values, topk_indices = torch.topk(router_logits, k=top_k, dim=-1)
-        # topk_indices: (num_tokens, top_k)
+        _, topk_indices = torch.topk(router_logits, k=top_k, dim=-1)
 
         # Flatten to get all selected expert indices
-        selected_expert_indices = topk_indices.flatten()  # (num_tokens * top_k,)
+        selected_expert_indices = topk_indices.flatten()
 
         # Count unique activated experts
         unique_experts = torch.unique(selected_expert_indices)
         num_activated_experts = unique_experts.numel()
-        times["num_activated_experts"] = num_activated_experts
+        times["num_activated_experts"] = int(num_activated_experts)
 
         # Count token distribution for each activated expert
-        # Count how many tokens select each expert
         expert_token_counts = torch.bincount(
             selected_expert_indices, minlength=self.n_routed_experts
         )
-        # Get counts only for activated experts
         activated_expert_token_counts = expert_token_counts[unique_experts]
 
-        # Convert to list for JSON serialization
         expert_token_distribution = {
             int(expert_id.item()): int(count.item())
             for expert_id, count in zip(unique_experts, activated_expert_token_counts)
@@ -333,14 +332,21 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         times["expert_token_distribution"] = expert_token_distribution
 
         times["router_logits_shape"] = str(router_logits.shape)
-        times["num_expert_requests"] = topk_indices.shape[0] * \
-            topk_indices.shape[1]
+        times["num_expert_requests"] = int(
+            topk_indices.shape[0] * topk_indices.shape[1]
+        )
 
         if self.profile_component_output_dir is not None:
-            # save the topk_indices to a file
+            # Save the topk_indices to a file
+            os.makedirs(self.profile_component_output_dir, exist_ok=True)
             topk_indices_file = os.path.join(
-                self.profile_component_output_dir, f"topk_indices_{self.count}.pt")
-            torch.save(topk_indices, topk_indices_file)
+                self.profile_component_output_dir, f"topk_indices_{self.count}.pt"
+            )
+            try:
+                torch.save(topk_indices, topk_indices_file)
+            except Exception:
+                # Profiling must never break model execution
+                pass
             self.count += 1
 
         return topk_indices
@@ -357,10 +363,10 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        # Calculate expert statistics [ZXJ]
-        times = {}
+        # Optional expert statistics
         if self.enable_log_expert:
-            topk_indices = self.get_expert_statistics(router_logits, times)
+            times: Dict[str, Any] = {}
+            self.get_expert_statistics(router_logits, times)
 
         topk_output = self.topk(hidden_states, router_logits)
         final_hidden_states = self.experts(hidden_states, topk_output)
@@ -370,8 +376,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             and not use_reduce_scatter
             and not should_use_flashinfer_cutlass_moe_fp4_allgather()
         ):
-            final_hidden_states = tensor_model_parallel_all_reduce(
-                final_hidden_states)
+            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -422,8 +427,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                     ),
                 )
         else:
-            state.topk_output = self.topk.empty_topk_output(
-                hidden_states.device)
+            state.topk_output = self.topk.empty_topk_output(hidden_states.device)
 
     def op_dispatch_a(self, state):
         if self.ep_size > 1:
@@ -462,8 +466,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             )
 
     def op_output(self, state):
-        state.hidden_states_mlp_output = state.pop(
-            "hidden_states_after_combine")
+        state.hidden_states_mlp_output = state.pop("hidden_states_after_combine")
 
 
 class Qwen3MoeAttention(nn.Module):
@@ -594,12 +597,12 @@ class Qwen3MoeAttention(nn.Module):
             qkv,
             self.rotary_emb.position_sin,
             self.rotary_emb.position_cos,
-            self.q_norm.weight,
-            self.k_norm.weight,
             self.q_size,
             self.kv_size,
             self.head_dim,
-            self.q_norm.variance_epsilon,
+            eps=self.q_norm.variance_epsilon,
+            q_weight=self.q_norm.weight,
+            k_weight=self.k_norm.weight,
             q_bias=getattr(self.q_norm, "bias", None),
             k_bias=getattr(self.k_norm, "bias", None),
         )
@@ -625,11 +628,9 @@ class Qwen3MoeAttention(nn.Module):
         if use_fused:
             theta = getattr(self.config, "rope_theta", 10000.0)
             positions = (
-                positions.view(-1).to(dtype=torch.int32,
-                                      device=qkv.device).contiguous()
+                positions.view(-1).to(dtype=torch.int32, device=qkv.device).contiguous()
             )
-            factor, low, high, attention_factor = compute_yarn_parameters(
-                self.config)
+            factor, low, high, attention_factor = compute_yarn_parameters(self.config)
             fused_qk_norm_rope(
                 qkv,
                 self.num_heads,
@@ -647,13 +648,11 @@ class Qwen3MoeAttention(nn.Module):
                 high,
                 attention_factor,
             )
-            q, k, v = qkv.split(
-                [self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
             self._used_fused_qk_norm_rope_last_call = True
         else:
             # Fallback to non-fused QK Norm & RoPE implementation
-            q, k, v = qkv.split(
-                [self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
             q, k = apply_qk_norm(
                 q=q,
                 k=k,
@@ -751,8 +750,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(
-            config, "max_position_embeddings", 8192)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         head_dim = getattr(
             config, "head_dim", config.hidden_size // config.num_attention_heads
         )
@@ -812,8 +810,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=add_prefix("mlp", prefix),
             )
-        self.input_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
@@ -834,10 +831,11 @@ class Qwen3MoeDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         captured_last_layer_outputs: Optional[List[torch.Tensor]] = None,
         return_times: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, dict]:
-
-        times = {}  # [ZXJ]
-        timing_function = time.perf_counter  # [ZXJ]
+        **kwargs,
+    ) -> Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, Dict]:
+        # Per-layer timing (self-attention and MLP)
+        times: Dict[str, float] = {}
+        timing_function = time.perf_counter
 
         hidden_states, residual = (
             self.layer_communicator.prepare_attn_and_capture_last_layer_outputs(
@@ -845,20 +843,21 @@ class Qwen3MoeDecoderLayer(nn.Module):
                 residual,
                 forward_batch,
                 captured_last_layer_outputs=captured_last_layer_outputs,
+                **kwargs,
             )
         )
 
         if hidden_states.shape[0] != 0:
-            start = timing_function()  # [ZXJ]
+            start = timing_function()
             hidden_states = self.self_attn(
                 positions=positions,
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
             )
-            if _is_cuda:  # [ZXJ]
-                torch.cuda.synchronize()  # [ZXJ]
-            end = timing_function()  # [ZXJ]
-            times["self_attention"] = end - start  # [ZXJ]
+            if _is_cuda:
+                torch.cuda.synchronize()
+            end = timing_function()
+            times["self_attention"] = end - start
 
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
@@ -875,14 +874,14 @@ class Qwen3MoeDecoderLayer(nn.Module):
             forward_batch
         )
 
-        start = timing_function()  # [ZXJ]
+        start = timing_function()
         hidden_states = self.mlp(
             hidden_states, forward_batch, should_allreduce_fusion, use_reduce_scatter
         )
-        if _is_cuda:  # [ZXJ]
-            torch.cuda.synchronize()  # [ZXJ]
-        end = timing_function()  # [ZXJ]
-        times["mlp"] = end - start  # [ZXJ]
+        if _is_cuda:
+            torch.cuda.synchronize()
+        end = timing_function()
+        times["mlp"] = end - start
 
         if should_allreduce_fusion:
             hidden_states._sglang_needs_allreduce_fusion = True
@@ -891,8 +890,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
                 hidden_states, residual, forward_batch
             )
 
-        if return_times:  # [ZXJ]
-            return hidden_states, residual, times  # [ZXJ]
+        if return_times:
+            return hidden_states, residual, times
         return hidden_states, residual
 
     def op_comm_prepare_attn(
@@ -905,8 +904,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         tbo_subbatch_index: Optional[int] = None,
     ):
         state.hidden_states_after_comm_pre_attn, state.residual_after_input_ln = (
-            self.layer_communicator.prepare_attn(
-                hidden_states, residual, forward_batch)
+            self.layer_communicator.prepare_attn(hidden_states, residual, forward_batch)
         )
         state.update(
             dict(
@@ -927,8 +925,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
 
     def op_mlp(self, state):
         hidden_states = state.pop("hidden_states_mlp_input")
-        state.hidden_states_mlp_output = self.mlp(
-            hidden_states, state.forward_batch)
+        state.hidden_states_mlp_output = self.mlp(hidden_states, state.forward_batch)
 
     def op_comm_postprocess_layer(self, state):
         hidden_states, residual = self.layer_communicator.postprocess_layer(
@@ -971,10 +968,8 @@ class Qwen3MoeModel(Qwen2MoeModel):
             decoder_layer_type=decoder_layer_type,
             alt_stream=alt_stream,
         )
-
-        # initialize the output dir for profiling [ZXJ]
+        # Initialize the output dir for profiling (compatible with vLLM_profile tooling).
         print("Initializing customed Qwen3MoeModel")
-        # Optional component profiling (compatible with vLLM_profile tooling).
         self.count = 0
         self.profile_component_output_dir = os.getenv(
             "PROFILE_COMPONENT_OUTPUT_DIR", None
@@ -1028,49 +1023,78 @@ class Qwen3MoeModel(Qwen2MoeModel):
             hidden_states = pp_proxy_tensors["hidden_states"]
             residual = pp_proxy_tensors["residual"]
 
-        all_layer_times = []
-        aux_hidden_states = []
-        for i in range(self.start_layer, self.end_layer):
-            ctx = (
-                nullcontext()
-                if get_global_server_args().enable_piecewise_cuda_graph
-                else get_global_expert_distribution_recorder().with_current_layer(i)
+        all_layer_times: List[Dict[str, Any]] = []
+        aux_hidden_states: List[torch.Tensor] = []
+
+        if forward_batch.can_run_tbo:
+            # For TBO path we only profile total model time (layer times are not available).
+            hidden_states, residual = model_forward_maybe_tbo(
+                layers=self.layers,
+                enable_tbo=True,
+                input_data_scatter_mode=ScatterMode.model_input_output(),
+                positions=positions,
+                forward_batch=forward_batch,
+                hidden_states=hidden_states,
+                residual=residual,
             )
-            with ctx:
-                layer = self.layers[i]
-                if profiling_enabled:
-                    start = timing_function()
-                    if isinstance(layer, Qwen3MoeDecoderLayer):
+        else:
+            for i in range(self.start_layer, self.end_layer):
+                ctx = (
+                    nullcontext()
+                    if get_global_server_args().enable_piecewise_cuda_graph
+                    else get_global_expert_distribution_recorder().with_current_layer(i)
+                )
+                with ctx:
+                    layer = self.layers[i]
+                    if profiling_enabled and isinstance(layer, Qwen3MoeDecoderLayer):
+                        start = timing_function()
                         hidden_states, residual, layer_times = layer(
                             positions,
                             hidden_states,
                             forward_batch,
                             residual,
+                            captured_last_layer_outputs=(
+                                aux_hidden_states
+                                if getattr(layer, "_is_layer_to_capture", False)
+                                else None
+                            ),
                             return_times=True,
                         )
+                        if _is_cuda:
+                            torch.cuda.synchronize()
+                        end = timing_function()
+                        all_layer_times.append(
+                            {
+                                "layer_idx": i,
+                                "total_layer_time": end - start,
+                                "layer_details": layer_times,
+                            }
+                        )
                     else:
-                        layer_times = {}
+                        if profiling_enabled:
+                            start = timing_function()
                         hidden_states, residual = layer(
                             positions,
                             hidden_states,
                             forward_batch,
                             residual,
+                            captured_last_layer_outputs=(
+                                aux_hidden_states
+                                if getattr(layer, "_is_layer_to_capture", False)
+                                else None
+                            ),
                         )
-                    if _is_cuda:
-                        torch.cuda.synchronize()
-                    end = timing_function()
-                    all_layer_times.append({
-                        "layer_idx": i,
-                        "total_layer_time": end - start,
-                        "layer_details": layer_times,
-                    })
-                else:
-                    hidden_states, residual = layer(
-                        positions,
-                        hidden_states,
-                        forward_batch,
-                        residual,
-                    )
+                        if profiling_enabled:
+                            if _is_cuda:
+                                torch.cuda.synchronize()
+                            end = timing_function()
+                            all_layer_times.append(
+                                {
+                                    "layer_idx": i,
+                                    "total_layer_time": end - start,
+                                    "layer_details": {},
+                                }
+                            )
 
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(
@@ -1095,16 +1119,21 @@ class Qwen3MoeModel(Qwen2MoeModel):
                 f"{self.output_dir}/count_{self.count}_promptlenshape_"
                 f"{str(input_ids.shape)}_time{timing_function()}.json"
             )
-            with open(log_file, "w") as f:
-                json.dump(
-                    {"model_time": model_time, "layer_times": all_layer_times},
-                    f,
-                    indent=4,
-                )
+            try:
+                with open(log_file, "w") as f:
+                    json.dump(
+                        {"model_time": model_time, "layer_times": all_layer_times},
+                        f,
+                        indent=4,
+                    )
+            except Exception:
+                # Profiling should not break normal execution
+                pass
             self.count += 1
 
         if len(aux_hidden_states) == 0:
             return hidden_states
+
         return hidden_states, aux_hidden_states
 
 
@@ -1178,8 +1207,7 @@ class Qwen3MoeForCausalLM(nn.Module):
         # embed
         if start == 0:
             if input_embeds is None:
-                forward_batch.hidden_states = self.model.embed_tokens(
-                    input_ids)
+                forward_batch.hidden_states = self.model.embed_tokens(input_ids)
             else:
                 forward_batch.hidden_states = input_embeds
 
@@ -1235,8 +1263,7 @@ class Qwen3MoeForCausalLM(nn.Module):
                 ]
             )  # Specific layers for EAGLE3 support
         else:
-            self.model.set_eagle3_layers_to_capture(
-                [val + 1 for val in layer_ids])
+            self.model.set_eagle3_layers_to_capture([val + 1 for val in layer_ids])
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
@@ -1341,8 +1368,7 @@ class Qwen3MoeForCausalLM(nn.Module):
                         )
                         weight_loader(param, loaded_weight)
                     else:
-                        logger.warning(
-                            f"Parameter {name} not found in params_dict")
+                        logger.warning(f"Parameter {name} not found in params_dict")
 
         # TODO mimic deepseek
         # Lazy initialization of expert weights cache to avoid slowing down load_weights
