@@ -265,14 +265,15 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             self.top_k = config.num_experts_per_tok
 
         # Save num_experts_per_tok for expert activation statistics
-        self.num_experts_per_tok = config.num_experts_per_tok
-        self.n_routed_experts = config.num_experts
+        self.num_experts_per_tok = config.num_experts_per_tok  # [ZXJ]
+        self.n_routed_experts = config.num_experts  # [ZXJ]
 
-        self.count = 0
+        self.count = 0  # [ZXJ]
         self.profile_component_output_dir = os.getenv(
             "PROFILE_COMPONENT_OUTPUT_DIR", None
-        )
-        self.enable_log_expert = os.getenv("ENABLE_LOG_EXPERT", "0") == "1"
+        )  # [ZXJ]
+        self.enable_log_expert = os.getenv(
+            "ENABLE_LOG_EXPERT", "0") == "1"  # [ZXJ]
 
     def forward(
         self,
@@ -299,6 +300,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             if name not in ["correction_bias"]
         ]
 
+    # a new function for expert statisitcs [ZXJ]
     def get_expert_statistics(self, router_logits, times):
         """Calculate activated expert statistics."""
         # router_logits: (num_tokens, n_experts)
@@ -355,9 +357,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        # Calculate expert statistics
+        # Calculate expert statistics [ZXJ]
         times = {}
-
         if self.enable_log_expert:
             topk_indices = self.get_expert_statistics(router_logits, times)
 
@@ -835,8 +836,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
         return_times: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, dict]:
 
-        times = {}
-        timing_function = time.perf_counter
+        times = {}  # [ZXJ]
+        timing_function = time.perf_counter  # [ZXJ]
 
         hidden_states, residual = (
             self.layer_communicator.prepare_attn_and_capture_last_layer_outputs(
@@ -848,16 +849,16 @@ class Qwen3MoeDecoderLayer(nn.Module):
         )
 
         if hidden_states.shape[0] != 0:
-            start = timing_function()
+            start = timing_function()  # [ZXJ]
             hidden_states = self.self_attn(
                 positions=positions,
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
             )
-            if _is_cuda:
-                torch.cuda.synchronize()
-            end = timing_function()
-            times["self_attention"] = end - start
+            if _is_cuda:  # [ZXJ]
+                torch.cuda.synchronize()  # [ZXJ]
+            end = timing_function()  # [ZXJ]
+            times["self_attention"] = end - start  # [ZXJ]
 
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
@@ -874,14 +875,14 @@ class Qwen3MoeDecoderLayer(nn.Module):
             forward_batch
         )
 
-        start = timing_function()
+        start = timing_function()  # [ZXJ]
         hidden_states = self.mlp(
             hidden_states, forward_batch, should_allreduce_fusion, use_reduce_scatter
         )
-        if _is_cuda:
-            torch.cuda.synchronize()
-        end = timing_function()
-        times["mlp"] = end - start
+        if _is_cuda:  # [ZXJ]
+            torch.cuda.synchronize()  # [ZXJ]
+        end = timing_function()  # [ZXJ]
+        times["mlp"] = end - start  # [ZXJ]
 
         if should_allreduce_fusion:
             hidden_states._sglang_needs_allreduce_fusion = True
@@ -890,8 +891,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
                 hidden_states, residual, forward_batch
             )
 
-        if return_times:
-            return hidden_states, residual, times
+        if return_times:  # [ZXJ]
+            return hidden_states, residual, times  # [ZXJ]
         return hidden_states, residual
 
     def op_comm_prepare_attn(
@@ -971,6 +972,7 @@ class Qwen3MoeModel(Qwen2MoeModel):
             alt_stream=alt_stream,
         )
 
+        # initialize the output dir for profiling [ZXJ]
         print("Initializing customed Qwen3MoeModel")
         # Optional component profiling (compatible with vLLM_profile tooling).
         self.count = 0
