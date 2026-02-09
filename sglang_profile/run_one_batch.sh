@@ -32,4 +32,4 @@ python bench_one_batch.py \
     --log-decode-step 1 \
     --result-filename $RESULT_FILENAME \
     --disable-cuda-graph \
-    --prompt-file /data/xjzhang/vLLM_profile_v1/vLLM_profile/expert_distribution/sharegpt_text.jsonl
+    --prompt-file sharegpt_text.txt
