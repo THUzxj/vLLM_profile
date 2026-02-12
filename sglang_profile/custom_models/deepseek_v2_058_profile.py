@@ -195,6 +195,11 @@ def _patched_model_forward(
     )
     timing_function = time.perf_counter
     model_start = timing_function() if profiling_enabled else 0.0
+    model_start_event = None
+    model_end_event = None
+    if profiling_enabled and base._is_cuda:
+        model_start_event = torch.cuda.Event(enable_timing=True)
+        model_end_event = torch.cuda.Event(enable_timing=True)
 
     total_num_layers = self.end_layer - self.start_layer
     device = input_embeds.device if input_embeds is not None else input_ids.device
@@ -259,6 +264,7 @@ def _patched_model_forward(
 
     aux_hidden_states: list[torch.Tensor] = []
     all_layer_times: list[dict] = []
+    all_layer_times_cuda: list[dict] = []
 
     for i in range(normal_start_layer, normal_end_layer):
         ctx = (
@@ -278,6 +284,13 @@ def _patched_model_forward(
             layer = self.layers[i]
 
             if profiling_enabled:
+                layer_start_event = None
+                layer_end_event = None
+                if base._is_cuda:
+                    layer_start_event = torch.cuda.Event(enable_timing=True)
+                    layer_end_event = torch.cuda.Event(enable_timing=True)
+                    layer_start_event.record()
+
                 start = timing_function()
                 hidden_states, residual = layer(
                     positions,
@@ -291,12 +304,33 @@ def _patched_model_forward(
                 if base._is_cuda:
                     torch.cuda.synchronize()
                 end = timing_function()
+
+                layer_total_time_cuda = None
+                if (
+                    base._is_cuda
+                    and layer_start_event is not None
+                    and layer_end_event is not None
+                ):
+                    # elapsed_time returns milliseconds
+                    layer_end_event.record()
+                    torch.cuda.synchronize()
+                    layer_total_time_cuda = (
+                        layer_start_event.elapsed_time(layer_end_event) / 1000.0
+                    )
+
                 all_layer_times.append(
                     {
                         "layer_idx": i,
                         "total_layer_time": end - start,
                     }
                 )
+                if layer_total_time_cuda is not None:
+                    all_layer_times_cuda.append(
+                        {
+                            "layer_idx": i,
+                            "total_layer_time": layer_total_time_cuda,
+                        }
+                    )
             else:
                 hidden_states, residual = layer(
                     positions,
@@ -346,20 +380,49 @@ def _patched_model_forward(
 
     if profiling_enabled:
         if base._is_cuda:
+            if model_start_event is not None:
+                # Start CUDA timing for the whole model after inputs are prepared.
+                model_start_event.record()
             torch.cuda.synchronize()
         model_end = timing_function()
         model_time = model_end - model_start
+        model_time_cuda = None
+        if (
+            base._is_cuda
+            and model_start_event is not None
+            and model_end_event is not None
+        ):
+            model_end_event.record()
+            torch.cuda.synchronize()
+            # elapsed_time returns milliseconds
+            model_time_cuda = model_start_event.elapsed_time(model_end_event) / 1000.0
         log_file = (
-            f"{self.output_dir}/count_{self.count}_promptlenshape_"
+            f"{self.output_dir}/cputime/count_{self.count}_promptlenshape_"
+            f"{str(input_ids.shape)}_time{timing_function()}.json"
+        )
+        log_file_cuda = (
+            f"{self.output_dir}/cuda/count_{self.count}_promptlenshape_"
             f"{str(input_ids.shape)}_time{timing_function()}.json"
         )
         try:
+            os.makedirs(os.path.dirname(log_file), exist_ok=True)
             with open(log_file, "w") as f:
                 json.dump(
                     {"model_time": model_time, "layer_times": all_layer_times},
                     f,
                     indent=4,
                 )
+            if model_time_cuda is not None and base._is_cuda:
+                os.makedirs(os.path.dirname(log_file_cuda), exist_ok=True)
+                with open(log_file_cuda, "w") as f:
+                    json.dump(
+                        {
+                            "model_time": model_time_cuda,
+                            "layer_times": all_layer_times_cuda,
+                        },
+                        f,
+                        indent=4,
+                    )
         except Exception:
             # Profiling must not break normal execution.
             pass
@@ -383,6 +446,8 @@ _apply_patches()
 
 
 EntryClass = [DeepseekV2ForCausalLM, DeepseekV3ForCausalLM, DeepseekV32ForCausalLM]
+
+
 
 
 

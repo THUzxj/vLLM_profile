@@ -6,13 +6,7 @@ export MODEL_PATH="/nfs/xjzhang/Qwen/Qwen3-235B-A22B-1layer-new2"
 export MODEL_NAME=${MODEL_PATH##*/}
 
 # Component profiling environment variables
-# Option 1: Use PROFILE_COMPONENT_OUTPUT_DIR to specify output directory directly
 export PROFILE_COMPONENT_OUTPUT_DIR="./results/component_times_output_${MODEL_NAME}_${DATE}"
-# Option 2: Use PROFILE_COMPONENT_BS and PROFILE_COMPONENT_IN to auto-generate output directory
-# export PROFILE_COMPONENT_BS=32
-# export PROFILE_COMPONENT_IN=256
-# export PROFILE_COMPONENT_MODEL="qwen3-moe"  # Optional, defaults to "qwen3-moe" or "deepseek-v2"
-
 RESULT_FILENAME="results/sglang_qwen3_4b_bs32_il256_dp2_ep2_tp2_enabledpattn_decode_step_${DATE}.log"
 
 # Deployment Config
@@ -33,3 +27,7 @@ python bench_one_batch_058.py \
     --result-filename $RESULT_FILENAME \
     --disable-cuda-graph \
     --prompt-file sharegpt_text.txt
+
+python analyze_component_times.py $PROFILE_COMPONENT_OUTPUT_DIR/cuda
+
+python plot_mean_time_vs_batch.py $PROFILE_COMPONENT_OUTPUT_DIR/cuda/analysis

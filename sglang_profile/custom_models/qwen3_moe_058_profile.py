@@ -39,7 +39,7 @@ from sglang.srt.distributed import (
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
 from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
-from sglang.srt.layers.communicator import LayerCommunicator, LayerScatterModes
+from sglang.srt.layers.communicator import LayerCommunicator, LayerScatterModes, ScatterMode
 from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
@@ -81,6 +81,7 @@ from sglang.srt.utils import (
     is_non_idle_and_non_empty,
     is_npu,
 )
+from sglang.srt.batch_overlap.two_batch_overlap import model_forward_maybe_tbo
 
 _is_cuda = is_cuda()
 
@@ -169,7 +170,8 @@ def compute_yarn_parameters(
     def find_correction_dim(num_rotations, dim, base, max_position_embeddings):
         """Inverse dimension formula to find the dimension based on the number of rotations"""
         return (
-            dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi))
+            dim * math.log(max_position_embeddings /
+                           (num_rotations * 2 * math.pi))
         ) / (2 * math.log(base))
 
     def find_correction_range(
@@ -177,7 +179,8 @@ def compute_yarn_parameters(
     ):
         """Find dimension range bounds based on rotations"""
         low = find_correction_dim(low_rot, dim, base, max_position_embeddings)
-        high = find_correction_dim(high_rot, dim, base, max_position_embeddings)
+        high = find_correction_dim(
+            high_rot, dim, base, max_position_embeddings)
         if truncate:
             low = math.floor(low)
             high = math.ceil(high)
@@ -275,6 +278,12 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             "PROFILE_COMPONENT_OUTPUT_DIR", None
         )
         self.enable_log_expert = os.getenv("ENABLE_LOG_EXPERT", "0") == "1"
+        
+        # For profiling gate and experts times
+        self.gate_time = 0.0
+        self.experts_time = 0.0
+        self.gate_time_cuda = 0.0
+        self.experts_time_cuda = 0.0
 
     def forward(
         self,
@@ -360,8 +369,31 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
+        # Measure gate time
+        timing_function = time.perf_counter
+        gate_start = timing_function()
+        gate_start_event = None
+        gate_end_event = None
+        if _is_cuda:
+            gate_start_event = torch.cuda.Event(enable_timing=True)
+            gate_end_event = torch.cuda.Event(enable_timing=True)
+            gate_start_event.record()
+        
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
+        
+        if _is_cuda:
+            if gate_end_event is not None:
+                gate_end_event.record()
+            torch.cuda.synchronize()
+        gate_end = timing_function()
+        self.gate_time = gate_end - gate_start
+        if _is_cuda and gate_start_event is not None and gate_end_event is not None:
+            self.gate_time_cuda = (
+                gate_start_event.elapsed_time(gate_end_event) / 1000.0
+            )
+        else:
+            self.gate_time_cuda = 0.0
 
         # Optional expert statistics
         if self.enable_log_expert:
@@ -369,23 +401,73 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             self.get_expert_statistics(router_logits, times)
 
         topk_output = self.topk(hidden_states, router_logits)
+        
+        # Measure experts time
+        experts_start = timing_function()
+        experts_start_event = None
+        experts_end_event = None
+        if _is_cuda:
+            experts_start_event = torch.cuda.Event(enable_timing=True)
+            experts_end_event = torch.cuda.Event(enable_timing=True)
+            experts_start_event.record()
+        
         final_hidden_states = self.experts(hidden_states, topk_output)
+        
+        if _is_cuda:
+            if experts_end_event is not None:
+                experts_end_event.record()
+            torch.cuda.synchronize()
+        experts_end = timing_function()
+        self.experts_time = experts_end - experts_start
+        if _is_cuda and experts_start_event is not None and experts_end_event is not None:
+            self.experts_time_cuda = (
+                experts_start_event.elapsed_time(experts_end_event) / 1000.0
+            )
+        else:
+            self.experts_time_cuda = 0.0
+        
         if (
             self.tp_size > 1
             and not should_allreduce_fusion
             and not use_reduce_scatter
             and not should_use_flashinfer_cutlass_moe_fp4_allgather()
         ):
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
     def forward_deepep(
         self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
     ) -> torch.Tensor:
+        timing_function = time.perf_counter
+        
         if hidden_states.shape[0] > 0:
+            # Measure gate time
+            gate_start = timing_function()
+            gate_start_event = None
+            gate_end_event = None
+            if _is_cuda:
+                gate_start_event = torch.cuda.Event(enable_timing=True)
+                gate_end_event = torch.cuda.Event(enable_timing=True)
+                gate_start_event.record()
+            
             # router_logits: (num_tokens, n_experts)
             router_logits, _ = self.gate(hidden_states)
+            
+            if _is_cuda:
+                if gate_end_event is not None:
+                    gate_end_event.record()
+                torch.cuda.synchronize()
+            gate_end = timing_function()
+            self.gate_time = gate_end - gate_start
+            if _is_cuda and gate_start_event is not None and gate_end_event is not None:
+                self.gate_time_cuda = (
+                    gate_start_event.elapsed_time(gate_end_event) / 1000.0
+                )
+            else:
+                self.gate_time_cuda = 0.0
+            
             topk_output = self.topk(
                 hidden_states,
                 router_logits,
@@ -395,11 +477,37 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                 ),
             )
         else:
+            self.gate_time = 0.0
+            self.gate_time_cuda = 0.0
             topk_output = self.topk.empty_topk_output(hidden_states.device)
+        
+        # Measure experts time
+        experts_start = timing_function()
+        experts_start_event = None
+        experts_end_event = None
+        if _is_cuda:
+            experts_start_event = torch.cuda.Event(enable_timing=True)
+            experts_end_event = torch.cuda.Event(enable_timing=True)
+            experts_start_event.record()
+        
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             topk_output=topk_output,
         )
+        
+        if _is_cuda:
+            if experts_end_event is not None:
+                experts_end_event.record()
+            torch.cuda.synchronize()
+        experts_end = timing_function()
+        self.experts_time = experts_end - experts_start
+        if _is_cuda and experts_start_event is not None and experts_end_event is not None:
+            self.experts_time_cuda = (
+                experts_start_event.elapsed_time(experts_end_event) / 1000.0
+            )
+        else:
+            self.experts_time_cuda = 0.0
+        
         return final_hidden_states
 
     def op_gate(self, state):
@@ -427,7 +535,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                     ),
                 )
         else:
-            state.topk_output = self.topk.empty_topk_output(hidden_states.device)
+            state.topk_output = self.topk.empty_topk_output(
+                hidden_states.device)
 
     def op_dispatch_a(self, state):
         if self.ep_size > 1:
@@ -466,7 +575,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             )
 
     def op_output(self, state):
-        state.hidden_states_mlp_output = state.pop("hidden_states_after_combine")
+        state.hidden_states_mlp_output = state.pop(
+            "hidden_states_after_combine")
 
 
 class Qwen3MoeAttention(nn.Module):
@@ -571,6 +681,12 @@ class Qwen3MoeAttention(nn.Module):
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.alt_stream = alt_stream
+        
+        # For profiling prepare and core times
+        self.attn_prepare_time = 0.0
+        self.attn_core_time = 0.0
+        self.attn_prepare_time_cuda = 0.0
+        self.attn_core_time_cuda = 0.0
 
     def op_prepare(self, state):
         state.attn_intermediate_state = self.forward_prepare(
@@ -628,9 +744,11 @@ class Qwen3MoeAttention(nn.Module):
         if use_fused:
             theta = getattr(self.config, "rope_theta", 10000.0)
             positions = (
-                positions.view(-1).to(dtype=torch.int32, device=qkv.device).contiguous()
+                positions.view(-1).to(dtype=torch.int32,
+                                      device=qkv.device).contiguous()
             )
-            factor, low, high, attention_factor = compute_yarn_parameters(self.config)
+            factor, low, high, attention_factor = compute_yarn_parameters(
+                self.config)
             fused_qk_norm_rope(
                 qkv,
                 self.num_heads,
@@ -648,11 +766,13 @@ class Qwen3MoeAttention(nn.Module):
                 high,
                 attention_factor,
             )
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k, v = qkv.split(
+                [self.q_size, self.kv_size, self.kv_size], dim=-1)
             self._used_fused_qk_norm_rope_last_call = True
         else:
             # Fallback to non-fused QK Norm & RoPE implementation
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k, v = qkv.split(
+                [self.q_size, self.kv_size, self.kv_size], dim=-1)
             q, k = apply_qk_norm(
                 q=q,
                 k=k,
@@ -686,24 +806,64 @@ class Qwen3MoeAttention(nn.Module):
         forward_batch: ForwardBatch,
     ):
         if hidden_states.shape[0] == 0:
+            self.attn_prepare_time = 0.0
+            self.attn_prepare_time_cuda = 0.0
             return hidden_states, forward_batch, None
+        
+        # Measure prepare time
+        timing_function = time.perf_counter
+        prepare_start = timing_function()
+        prepare_start_event = None
+        prepare_end_event = None
+        if _is_cuda:
+            prepare_start_event = torch.cuda.Event(enable_timing=True)
+            prepare_end_event = torch.cuda.Event(enable_timing=True)
+            prepare_start_event.record()
+        
         if not _is_npu:
-            return self.forward_prepare_native(
+            result = self.forward_prepare_native(
                 positions=positions,
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
             )
         else:
-            return self.forward_prepare_npu(
+            result = self.forward_prepare_npu(
                 positions=positions,
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
             )
+        
+        if _is_cuda:
+            if prepare_end_event is not None:
+                prepare_end_event.record()
+            torch.cuda.synchronize()
+        prepare_end = timing_function()
+        self.attn_prepare_time = prepare_end - prepare_start
+        if _is_cuda and prepare_start_event is not None and prepare_end_event is not None:
+            self.attn_prepare_time_cuda = (
+                prepare_start_event.elapsed_time(prepare_end_event) / 1000.0
+            )
+        else:
+            self.attn_prepare_time_cuda = 0.0
+        
+        return result
 
     def forward_core(self, intermediate_state):
         hidden_states, forward_batch, inner_state = intermediate_state
         if inner_state is None:
+            self.attn_core_time = 0.0
+            self.attn_core_time_cuda = 0.0
             return hidden_states
+
+        # Measure core time
+        timing_function = time.perf_counter
+        core_start = timing_function()
+        core_start_event = None
+        core_end_event = None
+        if _is_cuda:
+            core_start_event = torch.cuda.Event(enable_timing=True)
+            core_end_event = torch.cuda.Event(enable_timing=True)
+            core_start_event.record()
 
         q, k, v, fb = inner_state
 
@@ -720,6 +880,20 @@ class Qwen3MoeAttention(nn.Module):
             save_kv_cache=save_kv_cache,
         )
         output, _ = self.o_proj(attn_output)
+        
+        if _is_cuda:
+            if core_end_event is not None:
+                core_end_event.record()
+            torch.cuda.synchronize()
+        core_end = timing_function()
+        self.attn_core_time = core_end - core_start
+        if _is_cuda and core_start_event is not None and core_end_event is not None:
+            self.attn_core_time_cuda = (
+                core_start_event.elapsed_time(core_end_event) / 1000.0
+            )
+        else:
+            self.attn_core_time_cuda = 0.0
+        
         return output
 
     def forward(
@@ -750,7 +924,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+        max_position_embeddings = getattr(
+            config, "max_position_embeddings", 8192)
         head_dim = getattr(
             config, "head_dim", config.hidden_size // config.num_attention_heads
         )
@@ -810,7 +985,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=add_prefix("mlp", prefix),
             )
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
@@ -832,9 +1008,14 @@ class Qwen3MoeDecoderLayer(nn.Module):
         captured_last_layer_outputs: Optional[List[torch.Tensor]] = None,
         return_times: bool = False,
         **kwargs,
-    ) -> Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, Dict]:
-        # Per-layer timing (self-attention and MLP)
+    ) -> (
+        Tuple[torch.Tensor, torch.Tensor]
+        | Tuple[torch.Tensor, torch.Tensor, Dict]
+        | Tuple[torch.Tensor, torch.Tensor, Dict, Dict]
+    ):
+        # Per-layer timing (self-attention and MLP), CPU and CUDA separated
         times: Dict[str, float] = {}
+        times_cuda: Dict[str, float] = {}
         timing_function = time.perf_counter
 
         hidden_states, residual = (
@@ -848,6 +1029,13 @@ class Qwen3MoeDecoderLayer(nn.Module):
         )
 
         if hidden_states.shape[0] != 0:
+            attn_start_event = None
+            attn_end_event = None
+            if _is_cuda:
+                attn_start_event = torch.cuda.Event(enable_timing=True)
+                attn_end_event = torch.cuda.Event(enable_timing=True)
+                attn_start_event.record()
+
             start = timing_function()
             hidden_states = self.self_attn(
                 positions=positions,
@@ -855,9 +1043,23 @@ class Qwen3MoeDecoderLayer(nn.Module):
                 forward_batch=forward_batch,
             )
             if _is_cuda:
+                if attn_end_event is not None:
+                    attn_end_event.record()
                 torch.cuda.synchronize()
             end = timing_function()
             times["self_attention"] = end - start
+            if _is_cuda and attn_start_event is not None and attn_end_event is not None:
+                # CUDA event timing in seconds
+                times_cuda["self_attention"] = (
+                    attn_start_event.elapsed_time(attn_end_event) / 1000.0
+                )
+            
+            # Add attention prepare and core times
+            times["attention_prepare"] = self.self_attn.attn_prepare_time
+            times["attention_core"] = self.self_attn.attn_core_time
+            if _is_cuda:
+                times_cuda["attention_prepare"] = self.self_attn.attn_prepare_time_cuda
+                times_cuda["attention_core"] = self.self_attn.attn_core_time_cuda
 
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
@@ -874,14 +1076,35 @@ class Qwen3MoeDecoderLayer(nn.Module):
             forward_batch
         )
 
+        mlp_start_event = None
+        mlp_end_event = None
+        if _is_cuda:
+            mlp_start_event = torch.cuda.Event(enable_timing=True)
+            mlp_end_event = torch.cuda.Event(enable_timing=True)
+            mlp_start_event.record()
+
         start = timing_function()
         hidden_states = self.mlp(
             hidden_states, forward_batch, should_allreduce_fusion, use_reduce_scatter
         )
         if _is_cuda:
+            if mlp_end_event is not None:
+                mlp_end_event.record()
             torch.cuda.synchronize()
         end = timing_function()
         times["mlp"] = end - start
+        if _is_cuda and mlp_start_event is not None and mlp_end_event is not None:
+            # CUDA event timing in seconds
+            times_cuda["mlp"] = mlp_start_event.elapsed_time(
+                mlp_end_event) / 1000.0
+        
+        # Add MLP gate and experts times
+        if isinstance(self.mlp, Qwen3MoeSparseMoeBlock):
+            times["mlp_gate"] = self.mlp.gate_time
+            times["mlp_experts"] = self.mlp.experts_time
+            if _is_cuda:
+                times_cuda["mlp_gate"] = self.mlp.gate_time_cuda
+                times_cuda["mlp_experts"] = self.mlp.experts_time_cuda
 
         if should_allreduce_fusion:
             hidden_states._sglang_needs_allreduce_fusion = True
@@ -891,7 +1114,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
             )
 
         if return_times:
-            return hidden_states, residual, times
+            return hidden_states, residual, times, times_cuda
         return hidden_states, residual
 
     def op_comm_prepare_attn(
@@ -904,7 +1127,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
         tbo_subbatch_index: Optional[int] = None,
     ):
         state.hidden_states_after_comm_pre_attn, state.residual_after_input_ln = (
-            self.layer_communicator.prepare_attn(hidden_states, residual, forward_batch)
+            self.layer_communicator.prepare_attn(
+                hidden_states, residual, forward_batch)
         )
         state.update(
             dict(
@@ -925,7 +1149,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
 
     def op_mlp(self, state):
         hidden_states = state.pop("hidden_states_mlp_input")
-        state.hidden_states_mlp_output = self.mlp(hidden_states, state.forward_batch)
+        state.hidden_states_mlp_output = self.mlp(
+            hidden_states, state.forward_batch)
 
     def op_comm_postprocess_layer(self, state):
         hidden_states, residual = self.layer_communicator.postprocess_layer(
@@ -1011,6 +1236,11 @@ class Qwen3MoeModel(Qwen2MoeModel):
         )
         timing_function = time.perf_counter
         model_start = timing_function() if profiling_enabled else 0.0
+        model_start_event = None
+        model_end_event = None
+        if profiling_enabled and _is_cuda:
+            model_start_event = torch.cuda.Event(enable_timing=True)
+            model_end_event = torch.cuda.Event(enable_timing=True)
 
         if self.pp_group.is_first_rank:
             if input_embeds is None:
@@ -1024,7 +1254,12 @@ class Qwen3MoeModel(Qwen2MoeModel):
             residual = pp_proxy_tensors["residual"]
 
         all_layer_times: List[Dict[str, Any]] = []
+        all_layer_times_cuda: List[Dict[str, Any]] = []
         aux_hidden_states: List[torch.Tensor] = []
+
+        if profiling_enabled and _is_cuda and model_start_event is not None:
+            # Start CUDA timing for the whole model after inputs are prepared.
+            model_start_event.record()
 
         if forward_batch.can_run_tbo:
             # For TBO path we only profile total model time (layer times are not available).
@@ -1047,8 +1282,17 @@ class Qwen3MoeModel(Qwen2MoeModel):
                 with ctx:
                     layer = self.layers[i]
                     if profiling_enabled and isinstance(layer, Qwen3MoeDecoderLayer):
+                        layer_start_event = None
+                        layer_end_event = None
+                        if _is_cuda:
+                            layer_start_event = torch.cuda.Event(
+                                enable_timing=True)
+                            layer_end_event = torch.cuda.Event(
+                                enable_timing=True)
+                            layer_start_event.record()
+
                         start = timing_function()
-                        hidden_states, residual, layer_times = layer(
+                        hidden_states, residual, layer_times, layer_times_cuda = layer(
                             positions,
                             hidden_states,
                             forward_batch,
@@ -1061,8 +1305,23 @@ class Qwen3MoeModel(Qwen2MoeModel):
                             return_times=True,
                         )
                         if _is_cuda:
+                            if layer_end_event is not None:
+                                layer_end_event.record()
                             torch.cuda.synchronize()
                         end = timing_function()
+
+                        layer_total_time_cuda = None
+                        if (
+                            _is_cuda
+                            and layer_start_event is not None
+                            and layer_end_event is not None
+                        ):
+                            # elapsed_time returns milliseconds
+                            layer_total_time_cuda = (
+                                layer_start_event.elapsed_time(
+                                    layer_end_event) / 1000.0
+                            )
+
                         all_layer_times.append(
                             {
                                 "layer_idx": i,
@@ -1070,8 +1329,25 @@ class Qwen3MoeModel(Qwen2MoeModel):
                                 "layer_details": layer_times,
                             }
                         )
+                        if layer_total_time_cuda is not None:
+                            all_layer_times_cuda.append(
+                                {
+                                    "layer_idx": i,
+                                    "total_layer_time": layer_total_time_cuda,
+                                    "layer_details": layer_times_cuda,
+                                }
+                            )
                     else:
                         if profiling_enabled:
+                            layer_start_event = None
+                            layer_end_event = None
+                            if _is_cuda:
+                                layer_start_event = torch.cuda.Event(
+                                    enable_timing=True)
+                                layer_end_event = torch.cuda.Event(
+                                    enable_timing=True)
+                                layer_start_event.record()
+
                             start = timing_function()
                         hidden_states, residual = layer(
                             positions,
@@ -1086,8 +1362,23 @@ class Qwen3MoeModel(Qwen2MoeModel):
                         )
                         if profiling_enabled:
                             if _is_cuda:
+                                if layer_end_event is not None:
+                                    layer_end_event.record()
                                 torch.cuda.synchronize()
                             end = timing_function()
+
+                            layer_total_time_cuda = None
+                            if (
+                                _is_cuda
+                                and layer_start_event is not None
+                                and layer_end_event is not None
+                            ):
+                                layer_total_time_cuda = (
+                                    layer_start_event.elapsed_time(
+                                        layer_end_event)
+                                    / 1000.0
+                                )
+
                             all_layer_times.append(
                                 {
                                     "layer_idx": i,
@@ -1095,6 +1386,14 @@ class Qwen3MoeModel(Qwen2MoeModel):
                                     "layer_details": {},
                                 }
                             )
+                            if layer_total_time_cuda is not None:
+                                all_layer_times_cuda.append(
+                                    {
+                                        "layer_idx": i,
+                                        "total_layer_time": layer_total_time_cuda,
+                                        "layer_details": {},
+                                    }
+                                )
 
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(
@@ -1112,13 +1411,33 @@ class Qwen3MoeModel(Qwen2MoeModel):
 
         if profiling_enabled:
             if _is_cuda:
+                if model_end_event is not None:
+                    model_end_event.record()
                 torch.cuda.synchronize()
             model_end = timing_function()
             model_time = model_end - model_start
+            model_time_cuda = None
+            if (
+                _is_cuda
+                and model_start_event is not None
+                and model_end_event is not None
+            ):
+                # elapsed_time returns milliseconds
+                model_time_cuda = (
+                    model_start_event.elapsed_time(model_end_event) / 1000.0
+                )
+
             log_file = (
-                f"{self.output_dir}/count_{self.count}_promptlenshape_"
+                f"{self.output_dir}/cputime/count_{self.count}_promptlenshape_"
                 f"{str(input_ids.shape)}_time{timing_function()}.json"
             )
+            log_file_cuda = (
+                f"{self.output_dir}/cuda/count_{self.count}_promptlenshape_"
+                f"{str(input_ids.shape)}_time{timing_function()}.json"
+            )
+
+            os.makedirs(os.path.dirname(log_file), exist_ok=True)
+            os.makedirs(os.path.dirname(log_file_cuda), exist_ok=True)
             try:
                 with open(log_file, "w") as f:
                     json.dump(
@@ -1126,6 +1445,16 @@ class Qwen3MoeModel(Qwen2MoeModel):
                         f,
                         indent=4,
                     )
+                if model_time_cuda is not None and _is_cuda:
+                    with open(log_file_cuda, "w") as f:
+                        json.dump(
+                            {
+                                "model_time": model_time_cuda,
+                                "layer_times": all_layer_times_cuda,
+                            },
+                            f,
+                            indent=4,
+                        )
             except Exception:
                 # Profiling should not break normal execution
                 pass
@@ -1207,7 +1536,8 @@ class Qwen3MoeForCausalLM(nn.Module):
         # embed
         if start == 0:
             if input_embeds is None:
-                forward_batch.hidden_states = self.model.embed_tokens(input_ids)
+                forward_batch.hidden_states = self.model.embed_tokens(
+                    input_ids)
             else:
                 forward_batch.hidden_states = input_embeds
 
@@ -1263,7 +1593,8 @@ class Qwen3MoeForCausalLM(nn.Module):
                 ]
             )  # Specific layers for EAGLE3 support
         else:
-            self.model.set_eagle3_layers_to_capture([val + 1 for val in layer_ids])
+            self.model.set_eagle3_layers_to_capture(
+                [val + 1 for val in layer_ids])
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
@@ -1368,7 +1699,8 @@ class Qwen3MoeForCausalLM(nn.Module):
                         )
                         weight_loader(param, loaded_weight)
                     else:
-                        logger.warning(f"Parameter {name} not found in params_dict")
+                        logger.warning(
+                            f"Parameter {name} not found in params_dict")
 
         # TODO mimic deepseek
         # Lazy initialization of expert weights cache to avoid slowing down load_weights

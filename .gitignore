@@ -5,3 +5,4 @@
 *.pyc
 *.nsys-rep
 *.ncu-rep
+*.log
