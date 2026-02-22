@@ -72,7 +72,10 @@ from sglang.srt.layers.quantization.fp4_utils import initialize_fp4_gemm_config
 from sglang.srt.layers.quantization.fp8_utils import initialize_fp8_gemm_config
 from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
 from sglang.srt.managers.scheduler_dp_attn_mixin import prepare_mlp_sync_batch_raw
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.managers.schedule_policy import PrefillAdder, AddReqResult
+from sglang.srt.mem_cache.cache_init_params import CacheInitParams
+from sglang.srt.mem_cache.radix_cache import RadixCache
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
@@ -108,6 +111,8 @@ profile_activities = [torch.profiler.ProfilerActivity.CPU] + [
     ]
     if available
 ]
+
+logging_chuncked_prefill = os.environ.get("LOGGING_CHUNCKED_PREFILL", "False")
 
 
 def start_profile(profile_activities, profile_record_shapes=False, rank_print=print):
@@ -362,7 +367,7 @@ def prepare_synthetic_inputs_for_latency_test(
             0, 10000, (batch_size, input_len), dtype=np.int32)
     sampling_params = SamplingParams(
         temperature=0,
-        max_new_tokens=BenchArgs.output_len,
+        max_new_tokens=BenchArgs.output_len[0],
     )
 
     reqs = []
@@ -381,34 +386,40 @@ def prepare_synthetic_inputs_for_latency_test(
     return reqs
 
 
-class TreeCacheNamespace(SimpleNamespace):
-    def supports_swa(self) -> bool:
-        return False
-
-    def supports_mamba(self) -> bool:
-        return False
-
-    def is_chunk_cache(self) -> bool:
-        return False
-
-    def is_tree_cache(self) -> bool:
-        return not self.is_chunk_cache()
+def create_tree_cache(model_runner):
+    """
+    Create a real tree cache for benchmarks.
+    """
+    params = CacheInitParams(
+        disable=model_runner.server_args.disable_radix_cache,
+        req_to_token_pool=model_runner.req_to_token_pool,
+        token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
+        page_size=model_runner.server_args.page_size,
+        is_eagle=False,
+        tp_cache_group=None,
+        eviction_policy=model_runner.server_args.radix_eviction_policy,
+        enable_metrics=False,
+        enable_kv_cache_events=False,
+        enable_mamba_extra_buffer=False,
+        pp_rank=0,
+        pp_size=1,
+        chunked_prefill_size=model_runner.server_args.chunked_prefill_size,
+        sliding_window_size=None,
+    )
+    tree_cache = RadixCache(params)
+    return tree_cache
 
 
 @torch.no_grad
 def extend(reqs, model_runner):
-    # Create dummy tree_cache for benchmarks (no prefix caching, just allocation)
-    dummy_tree_cache = TreeCacheNamespace(
-        page_size=model_runner.server_args.page_size,
-        device=model_runner.device,
-        token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
-    )
+    # Create real tree_cache for benchmarks
+    tree_cache = create_tree_cache(model_runner)
 
     batch = ScheduleBatch.init_new(
         reqs=reqs,
         req_to_token_pool=model_runner.req_to_token_pool,
         token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
-        tree_cache=dummy_tree_cache,
+        tree_cache=tree_cache,
         model_config=model_runner.model_config,
         enable_overlap=False,
         spec_algorithm=SpeculativeAlgorithm.NONE,
@@ -420,6 +431,252 @@ def extend(reqs, model_runner):
     logits_output = model_runner.forward(forward_batch).logits_output
     next_token_ids = model_runner.sample(logits_output, forward_batch)
     return next_token_ids, logits_output.next_token_logits, batch
+
+
+@torch.no_grad
+def extend_chunked_prefill(reqs, model_runner, rank_print):
+    """
+    Extend requests using chunked prefill.
+    All requests will be processed in chunks until all input tokens are processed.
+    """
+    # Create real tree_cache for benchmarks
+    tree_cache = create_tree_cache(model_runner)
+
+    # Get chunked_prefill_size from server_args, default to 2048 if not set
+    chunked_prefill_size = model_runner.server_args.chunked_prefill_size
+    if chunked_prefill_size is None or chunked_prefill_size <= 0:
+        chunked_prefill_size = 2048
+
+    # Create an empty running batch for PrefillAdder
+    running_batch = ScheduleBatch(
+        reqs=[],
+        req_to_token_pool=model_runner.req_to_token_pool,
+        token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
+        tree_cache=tree_cache,
+        model_config=model_runner.model_config,
+        enable_overlap=False,
+        spec_algorithm=SpeculativeAlgorithm.NONE,
+    )
+
+    # Initialize requests for chunked prefill
+    for req in reqs:
+        # Ensure output_ids is initialized (should be a list, not None)
+        if req.output_ids is None:
+            req.output_ids = []
+        req.init_next_round_input(tree_cache)
+
+    # Track chunked requests that need to be processed in next iteration
+    # Map from req.rid to the chunked request object
+    chunked_reqs = {}
+    # Track which requests have been fully processed
+    processed_req_ids = set()
+    # Accumulate results for all completed requests
+    # Map from req.rid to (next_token_id, next_token_logits)
+    accumulated_next_token_ids = {}
+    accumulated_next_token_logits = {}
+    accumulated_batches = []  # List of batches that contain final chunks
+
+    counter = 0
+
+    # Process requests in chunks until all are complete
+    while True:
+        counter += 1
+        # Calculate max_prefill_tokens (use a large value for benchmark)
+        max_prefill_tokens = model_runner.max_total_num_tokens
+
+        # Create PrefillAdder for this iteration
+        adder = PrefillAdder(
+            page_size=model_runner.server_args.page_size,
+            tree_cache=tree_cache,
+            token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
+            running_batch=running_batch,
+            new_token_ratio=1.0,  # Use 1.0 for benchmark
+            rem_input_tokens=max_prefill_tokens,
+            rem_chunk_tokens=chunked_prefill_size,
+            mixed_with_decode_tokens=0,
+            priority_scheduling_preemption_threshold=0,
+            prefill_max_requests=None,
+            prefill_delayer_single_pass=None,
+            dllm_config=None,
+        )
+
+        # Add chunked requests from previous iteration
+        remaining_chunked_reqs = {}
+        for req_id, req in chunked_reqs.items():
+            # Ensure output_ids is initialized (should be a list, not None)
+            if req.output_ids is None:
+                req.output_ids = []
+            req.init_next_round_input(tree_cache)
+            new_chunked_req = adder.add_chunked_req(req)
+            if new_chunked_req is not None:
+                # Still has more chunks to process
+                remaining_chunked_reqs[req_id] = new_chunked_req
+            else:
+                # This request is fully processed
+                processed_req_ids.add(req_id)
+
+        # Add new requests that haven't been processed yet
+        for req in reqs:
+            if req.rid not in processed_req_ids and req.rid not in chunked_reqs:
+                # Ensure output_ids is initialized (should be a list, not None)
+                if req.output_ids is None:
+                    req.output_ids = []
+                req.init_next_round_input(tree_cache)
+                res = adder.add_one_req(
+                    req,
+                    has_chunked_req=len(chunked_reqs) > 0,
+                    truncation_align_size=None,
+                )
+                if res == AddReqResult.CONTINUE:
+                    # Request was added, check if it needs chunking
+                    if adder.new_chunked_req is not None and adder.new_chunked_req.rid == req.rid:
+                        # This request needs chunking
+                        remaining_chunked_reqs[req.rid] = adder.new_chunked_req
+                    else:
+                        # This request is fully processed in one chunk
+                        processed_req_ids.add(req.rid)
+
+        if logging_chuncked_prefill == "True":
+            print(f"""rank {torch.distributed.get_rank()} {counter}: len(remaining_chunked_reqs): {len(remaining_chunked_reqs)}, remaining_chunked_reqs ids: {[req.rid for req in remaining_chunked_reqs.values()]}""")
+        # Get the list of requests to run in this iteration
+        can_run_list = adder.can_run_list
+        if len(can_run_list) == 0:
+            break
+
+        # Mark requests in this batch as chunked if they will continue
+        chunked_req_for_batch = adder.new_chunked_req if adder.new_chunked_req is not None else None
+        # Mark requests that are chunked (is_chunked > 0 means they are intermediate chunks)
+        # These requests will continue in next iteration
+        if chunked_req_for_batch is not None:
+            # Find the request in can_run_list that matches chunked_req_for_batch
+            for req in can_run_list:
+                if req.rid == chunked_req_for_batch.rid:
+                    # This request will continue in next chunk, so it's an intermediate chunk
+                    req.is_chunked = 1
+                    break
+
+        if logging_chuncked_prefill == "True":
+            print(
+            f"rank {torch.distributed.get_rank()} counter {counter}: is_chunked_list: {[req.is_chunked for req in can_run_list]}, len(can_run_list): {len(can_run_list)}, can_run_list ids: {[req.rid for req in can_run_list]} chunked_req_for_batch ids: {chunked_req_for_batch.rid if chunked_req_for_batch is not None else None}")
+        # Create batch for this chunk
+        # Ensure this is a pure prefill batch with no decode requests
+        batch = ScheduleBatch.init_new(
+            reqs=can_run_list,
+            req_to_token_pool=model_runner.req_to_token_pool,
+            token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
+            tree_cache=tree_cache,
+            model_config=model_runner.model_config,
+            enable_overlap=False,
+            spec_algorithm=SpeculativeAlgorithm.NONE,
+            chunked_req=chunked_req_for_batch,
+        )
+        # Explicitly set decoding_reqs to None to ensure no decode requests are mixed
+        batch.decoding_reqs = None
+        batch.prepare_for_extend()
+        # Verify that forward_mode is EXTEND, not MIXED or DECODE
+        assert batch.forward_mode == ForwardMode.EXTEND or batch.forward_mode == ForwardMode.DLLM_EXTEND, \
+            f"Expected EXTEND mode, got {batch.forward_mode}"
+        _maybe_prepare_mlp_sync_batch(batch, model_runner)
+        model_worker_batch = batch.get_model_worker_batch()
+        forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
+        # Verify forward_batch is in EXTEND mode
+        assert forward_batch.forward_mode == ForwardMode.EXTEND or forward_batch.forward_mode == ForwardMode.DLLM_EXTEND, \
+            f"Expected EXTEND mode in forward_batch, got {forward_batch.forward_mode}"
+        logits_output = model_runner.forward(forward_batch).logits_output
+        next_token_ids = model_runner.sample(logits_output, forward_batch)
+
+        # In chunked prefill, only the last chunk (when is_chunked <= 0) returns next_token_ids
+        # For intermediate chunks, is_chunked > 0, so we don't save the results
+        if logging_chuncked_prefill == "True":
+            print(f"rank {torch.distributed.get_rank()} next_token_ids: {next_token_ids} logits_output.next_token_logits: {logits_output.next_token_logits.shape} batch {batch}")
+        # Accumulate results for requests that complete in this iteration
+        for i, req in enumerate(can_run_list):
+            if logging_chuncked_prefill == "True":
+                print(f"rank {torch.distributed.get_rank()} req: {req.rid} req.is_chunked: {req.is_chunked}")
+            # if req.is_chunked <= 0:
+            if req.rid in processed_req_ids:
+                # This request completed in this iteration
+                req_id = req.rid
+                accumulated_next_token_ids[req_id] = next_token_ids[i]
+                if logits_output.next_token_logits is not None:
+                    accumulated_next_token_logits[req_id] = logits_output.next_token_logits[i]
+                # Store batch for this request (we'll use the last batch containing this request)
+                accumulated_batches.append((req_id, batch))
+
+        # Update chunked_reqs for next iteration
+        # Increment is_chunked for requests that will continue (similar to scheduler behavior)
+        for req_id, req in remaining_chunked_reqs.items():
+            req.is_chunked += 1
+        chunked_reqs = remaining_chunked_reqs
+
+        # If no more chunked requests and all requests are processed, we're done
+        if logging_chuncked_prefill == "True":
+            print(f"rank {torch.distributed.get_rank()} {counter}: len(chunked_reqs): {len(chunked_reqs)}, processed_req_ids: {processed_req_ids}, len(reqs): {len(reqs)}, len(processed_req_ids): {len(processed_req_ids)}")
+        if len(chunked_reqs) == 0 and len(processed_req_ids) == len(reqs):
+            break
+
+    # Aggregate accumulated results
+    # Sort by req.rid to maintain consistent order
+    if len(accumulated_next_token_ids) == 0:
+        final_next_token_ids = None
+        final_next_token_logits = None
+        final_batch = None
+    else:
+        # Get all request IDs in the original order
+        req_ids_ordered = [req.rid for req in reqs]
+        # Build tensors in the same order as original requests
+        final_next_token_ids_list = []
+        final_next_token_logits_list = []
+        for req_id in req_ids_ordered:
+            if req_id in accumulated_next_token_ids:
+                final_next_token_ids_list.append(accumulated_next_token_ids[req_id])
+                if req_id in accumulated_next_token_logits:
+                    final_next_token_logits_list.append(accumulated_next_token_logits[req_id])
+        
+        # Stack into tensors
+        if len(final_next_token_ids_list) > 0:
+            final_next_token_ids = torch.stack(final_next_token_ids_list)
+            if len(final_next_token_logits_list) > 0:
+                final_next_token_logits = torch.stack(final_next_token_logits_list)
+            else:
+                final_next_token_logits = None
+        else:
+            final_next_token_ids = None
+            final_next_token_logits = None
+        
+        # Create a new batch containing all completed requests
+        # Collect all unique request IDs from accumulated_batches
+        completed_req_ids = set(accumulated_next_token_ids.keys())
+        # Get requests in the original order
+        completed_reqs = [req for req in reqs if req.rid in completed_req_ids]
+        
+        if len(completed_reqs) > 0:
+            # Create a new batch with all completed requests
+            final_batch = ScheduleBatch.init_new(
+                reqs=completed_reqs,
+                req_to_token_pool=model_runner.req_to_token_pool,
+                token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
+                tree_cache=tree_cache,
+                model_config=model_runner.model_config,
+                enable_overlap=False,
+                spec_algorithm=SpeculativeAlgorithm.NONE,
+                chunked_req=None,  # No chunked requests in final batch
+            )
+            # Explicitly set decoding_reqs to None to ensure no decode requests are mixed
+            final_batch.decoding_reqs = None
+            # Prepare the batch for extend (prefill is already done, but we need to prepare for decode)
+            # Note: Since prefill is already done, we might need to prepare for decode instead
+            # But for now, we'll keep it as extend since the KV cache is already allocated
+            final_batch.prepare_for_extend()
+        else:
+            final_batch = None
+    
+    if logging_chuncked_prefill == "True":
+        print(f"rank {torch.distributed.get_rank()} accumulated_next_token_ids: {accumulated_next_token_ids}, len(accumulated_next_token_logits): {len(accumulated_next_token_logits)}, len(accumulated_batches): {len(accumulated_batches)}")
+    if logging_chuncked_prefill == "True":
+        print(f"rank: {torch.distributed.get_rank()} final_next_token_ids: {final_next_token_ids} final_next_token_logits: {final_next_token_logits.shape} final_batch: {final_batch}")
+    # Return the accumulated results
+    return final_next_token_ids, final_next_token_logits, final_batch
 
 
 @torch.no_grad
@@ -590,7 +847,9 @@ def latency_test_run_once(
 
     synchronize(device)
     tic = time.perf_counter()
-    next_token_ids, next_token_logits, batch = extend(reqs, model_runner)
+    # next_token_ids, next_token_logits, batch = extend(reqs, model_runner)
+    next_token_ids, next_token_logits, batch = extend_chunked_prefill(
+        reqs, model_runner, rank_print)
     synchronize(device)
     prefill_latency = time.perf_counter() - tic
 
