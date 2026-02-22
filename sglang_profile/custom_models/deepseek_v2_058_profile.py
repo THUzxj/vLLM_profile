@@ -283,7 +283,7 @@ def _patched_model_forward(
                     aux_hidden_states.append(hidden_states + residual)
             layer = self.layers[i]
 
-            if profiling_enabled:
+            if profiling_enabled and forward_batch.forward_mode == base.ForwardMode.DECODE:
                 layer_start_event = None
                 layer_end_event = None
                 if base._is_cuda:
@@ -378,7 +378,7 @@ def _patched_model_forward(
             torch.cuda.current_stream(),
         )
 
-    if profiling_enabled:
+    if profiling_enabled and forward_batch.forward_mode == base.ForwardMode.DECODE:
         if base._is_cuda:
             if model_start_event is not None:
                 # Start CUDA timing for the whole model after inputs are prepared.

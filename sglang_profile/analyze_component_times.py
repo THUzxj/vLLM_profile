@@ -168,7 +168,7 @@ def analyze_component_times(data_dir: str, output_dir: str = None, output_len: i
     for json_file in json_files:
         count_number = parse_count_number(json_file.name)
 
-        if count_number % output_len == 0 or count_number < output_len * 3:
+        if count_number < output_len * 3:
             continue
 
         try:

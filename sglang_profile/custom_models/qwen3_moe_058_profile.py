@@ -64,7 +64,7 @@ from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from sglang.srt.layers.utils import get_layer_id
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen2_moe import Qwen2MoeMLP as Qwen3MoeMLP
 from sglang.srt.models.qwen2_moe import Qwen2MoeModel
@@ -278,12 +278,18 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             "PROFILE_COMPONENT_OUTPUT_DIR", None
         )
         self.enable_log_expert = os.getenv("ENABLE_LOG_EXPERT", "0") == "1"
-        
+
         # For profiling gate and experts times
         self.gate_time = 0.0
         self.experts_time = 0.0
         self.gate_time_cuda = 0.0
         self.experts_time_cuda = 0.0
+
+        # get TP rank
+        self.tp_rank = get_tensor_model_parallel_rank()
+        # print(
+        #     f"MoE Experts Initialized, TP Rank {self.tp_rank}"
+        # )
 
     def forward(
         self,
@@ -347,9 +353,10 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
 
         if self.profile_component_output_dir is not None:
             # Save the topk_indices to a file
-            os.makedirs(self.profile_component_output_dir, exist_ok=True)
+            os.makedirs(os.path.join(
+                self.profile_component_output_dir, "experts"), exist_ok=True)
             topk_indices_file = os.path.join(
-                self.profile_component_output_dir, f"topk_indices_{self.count}.pt"
+                self.profile_component_output_dir, "experts", f"topk_indices_{self.count}_{self.tp_rank}.pt"
             )
             try:
                 torch.save(topk_indices, topk_indices_file)
@@ -369,6 +376,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
+        # print(
+        #     f"MoE forward_normal called with hidden_states shape: {hidden_states.shape}")
+
         # Measure gate time
         timing_function = time.perf_counter
         gate_start = timing_function()
@@ -378,10 +388,10 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             gate_start_event = torch.cuda.Event(enable_timing=True)
             gate_end_event = torch.cuda.Event(enable_timing=True)
             gate_start_event.record()
-        
+
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        
+
         if _is_cuda:
             if gate_end_event is not None:
                 gate_end_event.record()
@@ -401,7 +411,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             self.get_expert_statistics(router_logits, times)
 
         topk_output = self.topk(hidden_states, router_logits)
-        
+
         # Measure experts time
         experts_start = timing_function()
         experts_start_event = None
@@ -410,9 +420,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             experts_start_event = torch.cuda.Event(enable_timing=True)
             experts_end_event = torch.cuda.Event(enable_timing=True)
             experts_start_event.record()
-        
+
         final_hidden_states = self.experts(hidden_states, topk_output)
-        
+
         if _is_cuda:
             if experts_end_event is not None:
                 experts_end_event.record()
@@ -425,7 +435,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             )
         else:
             self.experts_time_cuda = 0.0
-        
+
         if (
             self.tp_size > 1
             and not should_allreduce_fusion
@@ -441,7 +451,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
     ) -> torch.Tensor:
         timing_function = time.perf_counter
-        
+
         if hidden_states.shape[0] > 0:
             # Measure gate time
             gate_start = timing_function()
@@ -451,10 +461,10 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                 gate_start_event = torch.cuda.Event(enable_timing=True)
                 gate_end_event = torch.cuda.Event(enable_timing=True)
                 gate_start_event.record()
-            
+
             # router_logits: (num_tokens, n_experts)
             router_logits, _ = self.gate(hidden_states)
-            
+
             if _is_cuda:
                 if gate_end_event is not None:
                     gate_end_event.record()
@@ -467,7 +477,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                 )
             else:
                 self.gate_time_cuda = 0.0
-            
+
             topk_output = self.topk(
                 hidden_states,
                 router_logits,
@@ -480,7 +490,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             self.gate_time = 0.0
             self.gate_time_cuda = 0.0
             topk_output = self.topk.empty_topk_output(hidden_states.device)
-        
+
         # Measure experts time
         experts_start = timing_function()
         experts_start_event = None
@@ -489,12 +499,12 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             experts_start_event = torch.cuda.Event(enable_timing=True)
             experts_end_event = torch.cuda.Event(enable_timing=True)
             experts_start_event.record()
-        
+
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             topk_output=topk_output,
         )
-        
+
         if _is_cuda:
             if experts_end_event is not None:
                 experts_end_event.record()
@@ -507,7 +517,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             )
         else:
             self.experts_time_cuda = 0.0
-        
+
         return final_hidden_states
 
     def op_gate(self, state):
@@ -681,7 +691,7 @@ class Qwen3MoeAttention(nn.Module):
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.alt_stream = alt_stream
-        
+
         # For profiling prepare and core times
         self.attn_prepare_time = 0.0
         self.attn_core_time = 0.0
@@ -809,7 +819,7 @@ class Qwen3MoeAttention(nn.Module):
             self.attn_prepare_time = 0.0
             self.attn_prepare_time_cuda = 0.0
             return hidden_states, forward_batch, None
-        
+
         # Measure prepare time
         timing_function = time.perf_counter
         prepare_start = timing_function()
@@ -819,7 +829,7 @@ class Qwen3MoeAttention(nn.Module):
             prepare_start_event = torch.cuda.Event(enable_timing=True)
             prepare_end_event = torch.cuda.Event(enable_timing=True)
             prepare_start_event.record()
-        
+
         if not _is_npu:
             result = self.forward_prepare_native(
                 positions=positions,
@@ -832,7 +842,7 @@ class Qwen3MoeAttention(nn.Module):
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
             )
-        
+
         if _is_cuda:
             if prepare_end_event is not None:
                 prepare_end_event.record()
@@ -845,7 +855,7 @@ class Qwen3MoeAttention(nn.Module):
             )
         else:
             self.attn_prepare_time_cuda = 0.0
-        
+
         return result
 
     def forward_core(self, intermediate_state):
@@ -880,7 +890,7 @@ class Qwen3MoeAttention(nn.Module):
             save_kv_cache=save_kv_cache,
         )
         output, _ = self.o_proj(attn_output)
-        
+
         if _is_cuda:
             if core_end_event is not None:
                 core_end_event.record()
@@ -893,7 +903,7 @@ class Qwen3MoeAttention(nn.Module):
             )
         else:
             self.attn_core_time_cuda = 0.0
-        
+
         return output
 
     def forward(
@@ -1053,7 +1063,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
                 times_cuda["self_attention"] = (
                     attn_start_event.elapsed_time(attn_end_event) / 1000.0
                 )
-            
+
             # Add attention prepare and core times
             times["attention_prepare"] = self.self_attn.attn_prepare_time
             times["attention_core"] = self.self_attn.attn_core_time
@@ -1097,7 +1107,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
             # CUDA event timing in seconds
             times_cuda["mlp"] = mlp_start_event.elapsed_time(
                 mlp_end_event) / 1000.0
-        
+
         # Add MLP gate and experts times
         if isinstance(self.mlp, Qwen3MoeSparseMoeBlock):
             times["mlp_gate"] = self.mlp.gate_time
@@ -1221,6 +1231,9 @@ class Qwen3MoeModel(Qwen2MoeModel):
             )
         os.makedirs(self.output_dir, exist_ok=True)
 
+        # ignore tp + dp
+        self.tp_rank = get_tensor_model_parallel_rank()
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1229,6 +1242,9 @@ class Qwen3MoeModel(Qwen2MoeModel):
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[torch.Tensor, PPProxyTensors, Tuple[torch.Tensor, List[torch.Tensor]]]:
+        # Log forward mode
+        logger.info(f"Forward mode: {forward_batch.forward_mode}")
+        
         profiling_enabled = (
             os.getenv("PROFILE_COMPONENT_OUTPUT_DIR") is not None
             or os.getenv("PROFILE_COMPONENT_BS") is not None
@@ -1409,7 +1425,7 @@ class Qwen3MoeModel(Qwen2MoeModel):
                 else:
                     hidden_states, _ = self.norm(hidden_states, residual)
 
-        if profiling_enabled:
+        if profiling_enabled and forward_batch.forward_mode == ForwardMode.DECODE:
             if _is_cuda:
                 if model_end_event is not None:
                     model_end_event.record()
@@ -1429,11 +1445,11 @@ class Qwen3MoeModel(Qwen2MoeModel):
 
             log_file = (
                 f"{self.output_dir}/cputime/count_{self.count}_promptlenshape_"
-                f"{str(input_ids.shape)}_time{timing_function()}.json"
+                f"{str(input_ids.shape)}_tprank_{self.tp_rank}_time{timing_function()}.json"
             )
             log_file_cuda = (
                 f"{self.output_dir}/cuda/count_{self.count}_promptlenshape_"
-                f"{str(input_ids.shape)}_time{timing_function()}.json"
+                f"{str(input_ids.shape)}_tprank_{self.tp_rank}_time{timing_function()}.json"
             )
 
             os.makedirs(os.path.dirname(log_file), exist_ok=True)
