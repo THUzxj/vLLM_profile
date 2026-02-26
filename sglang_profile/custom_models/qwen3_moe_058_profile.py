@@ -35,7 +35,12 @@ from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
+    get_tp_group,
 )
+from sglang.srt.distributed.device_communicators.pynccl_allocator import (
+    use_symmetric_memory,
+)
+from sglang.srt.layers.dp_attention import is_allocation_symmetric
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
 from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
@@ -52,7 +57,7 @@ from sglang.srt.layers.moe import (
     get_moe_a2a_backend,
     should_use_flashinfer_cutlass_moe_fp4_allgather,
 )
-from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
+# from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
 from sglang.srt.layers.moe.utils import (
@@ -80,6 +85,8 @@ from sglang.srt.utils import (
     is_flashinfer_available,
     is_non_idle_and_non_empty,
     is_npu,
+    is_hip,
+    get_bool_env_var,
 )
 from sglang.srt.batch_overlap.two_batch_overlap import model_forward_maybe_tbo
 
@@ -100,6 +107,224 @@ _is_npu = is_npu()
 
 if _is_npu:
     from sgl_kernel_npu.norm.split_qkv_rmsnorm_rope import split_qkv_rmsnorm_rope
+
+
+from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
+
+
+class CustomedDeepEPMoE(DeepEPMoE):
+
+    def forward_impl(self, hidden_states, topk_output):
+        if self.deprecate_flag:
+            return super().forward_impl(
+                hidden_states,
+                topk_output,
+            )
+
+        # TODO: can we call super().forward here?
+
+        timing_function = time.perf_counter
+        experts_component_times = {}
+
+        # Measure dispatch time
+        dispatch_start = timing_function()
+        dispatch_start_event = None
+        dispatch_end_event = None
+        if _is_cuda:
+            dispatch_start_event = torch.cuda.Event(enable_timing=True)
+            dispatch_end_event = torch.cuda.Event(enable_timing=True)
+            dispatch_start_event.record()
+
+        dispatch_output = self.dispatcher.dispatch(
+            hidden_states=hidden_states, topk_output=topk_output
+        )
+        
+        if _is_cuda:
+            if dispatch_end_event is not None:
+                dispatch_end_event.record()
+            torch.cuda.synchronize()
+        dispatch_end = timing_function()
+        experts_component_times["dispatch"] = dispatch_end - dispatch_start
+        if _is_cuda and dispatch_start_event is not None and dispatch_end_event is not None:
+            experts_component_times["dispatch_cuda"] = (
+                dispatch_start_event.elapsed_time(dispatch_end_event) / 1000.0
+            )
+        else:
+            experts_component_times["dispatch_cuda"] = 0.0
+
+        # Measure run_moe_core time
+        moe_core_start = timing_function()
+        moe_core_start_event = None
+        moe_core_end_event = None
+        if _is_cuda:
+            moe_core_start_event = torch.cuda.Event(enable_timing=True)
+            moe_core_end_event = torch.cuda.Event(enable_timing=True)
+            moe_core_start_event.record()
+
+        combine_input = self.run_moe_core(dispatch_output)
+        
+        if _is_cuda:
+            if moe_core_end_event is not None:
+                moe_core_end_event.record()
+            torch.cuda.synchronize()
+        moe_core_end = timing_function()
+        experts_component_times["moe_core"] = moe_core_end - moe_core_start
+        if _is_cuda and moe_core_start_event is not None and moe_core_end_event is not None:
+            experts_component_times["moe_core_cuda"] = (
+                moe_core_start_event.elapsed_time(moe_core_end_event) / 1000.0
+            )
+        else:
+            experts_component_times["moe_core_cuda"] = 0.0
+
+        # Measure combine time
+        combine_start = timing_function()
+        combine_start_event = None
+        combine_end_event = None
+        if _is_cuda:
+            combine_start_event = torch.cuda.Event(enable_timing=True)
+            combine_end_event = torch.cuda.Event(enable_timing=True)
+            combine_start_event.record()
+
+        hidden_states = self.dispatcher.combine(
+            combine_input=combine_input,
+        )
+
+        if _is_cuda:
+            if combine_end_event is not None:
+                combine_end_event.record()
+            torch.cuda.synchronize()
+        combine_end = timing_function()
+        experts_component_times["combine"] = combine_end - combine_start
+        if _is_cuda and combine_start_event is not None and combine_end_event is not None:
+            experts_component_times["combine_cuda"] = (
+                combine_start_event.elapsed_time(combine_end_event) / 1000.0
+            )
+        else:
+            experts_component_times["combine_cuda"] = 0.0
+
+        return hidden_states, experts_component_times
+
+
+
+_is_hip = is_hip()
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+
+
+class CustomedFusedMoE(FusedMoE):
+    def forward_impl(self, hidden_states, topk_output):
+        origin_hidden_states_dim = hidden_states.shape[-1]
+        assert self.quant_method is not None
+
+        timing_function = time.perf_counter
+        experts_component_times = {}
+
+        # Measure dispatch time
+        dispatch_start = timing_function()
+        dispatch_start_event = None
+        dispatch_end_event = None
+        if _is_cuda:
+            dispatch_start_event = torch.cuda.Event(enable_timing=True)
+            dispatch_end_event = torch.cuda.Event(enable_timing=True)
+            dispatch_start_event.record()
+
+        dispatch_output = self.dispatcher.dispatch(
+            hidden_states=hidden_states, topk_output=topk_output
+        )
+        if _use_aiter and self.dispatcher.local_expert_mapping is not None:
+            self.expert_mask_gpu = (
+                (
+                    (self.dispatcher.local_expert_mapping >= 0)
+                    & (self.dispatcher.local_expert_mapping < self.num_local_experts)
+                )
+                .to(torch.int32)
+                .to(device="cuda")
+            )
+
+        if _is_cuda:
+            if dispatch_end_event is not None:
+                dispatch_end_event.record()
+            torch.cuda.synchronize()
+        dispatch_end = timing_function()
+        experts_component_times["dispatch"] = dispatch_end - dispatch_start
+        if _is_cuda and dispatch_start_event is not None and dispatch_end_event is not None:
+            experts_component_times["dispatch_cuda"] = (
+                dispatch_start_event.elapsed_time(dispatch_end_event) / 1000.0
+            )
+        else:
+            experts_component_times["dispatch_cuda"] = 0.0
+
+        # Measure run_moe_core time
+        moe_core_start = timing_function()
+        moe_core_start_event = None
+        moe_core_end_event = None
+        if _is_cuda:
+            moe_core_start_event = torch.cuda.Event(enable_timing=True)
+            moe_core_end_event = torch.cuda.Event(enable_timing=True)
+            moe_core_start_event.record()
+
+        combine_input = self.run_moe_core(
+            dispatch_output=dispatch_output,
+        )
+
+        if _is_cuda:
+            if moe_core_end_event is not None:
+                moe_core_end_event.record()
+            torch.cuda.synchronize()
+        moe_core_end = timing_function()
+        experts_component_times["moe_core"] = moe_core_end - moe_core_start
+        if _is_cuda and moe_core_start_event is not None and moe_core_end_event is not None:
+            experts_component_times["moe_core_cuda"] = (
+                moe_core_start_event.elapsed_time(moe_core_end_event) / 1000.0
+            )
+        else:
+            experts_component_times["moe_core_cuda"] = 0.0
+
+        # Measure combine time
+        combine_start = timing_function()
+        combine_start_event = None
+        combine_end_event = None
+        if _is_cuda:
+            combine_start_event = torch.cuda.Event(enable_timing=True)
+            combine_end_event = torch.cuda.Event(enable_timing=True)
+            combine_start_event.record()
+
+        with use_symmetric_memory(
+            get_tp_group(), disabled=not is_allocation_symmetric()
+        ):
+            final_hidden_states = self.dispatcher.combine(combine_input=combine_input)
+
+            # TODO: should we add some conditions here?
+            final_hidden_states = final_hidden_states[
+                ..., :origin_hidden_states_dim
+            ].contiguous()
+
+        if _is_cuda:
+            if combine_end_event is not None:
+                combine_end_event.record()
+            torch.cuda.synchronize()
+        combine_end = timing_function()
+        experts_component_times["combine"] = combine_end - combine_start
+        if _is_cuda and combine_start_event is not None and combine_end_event is not None:
+            experts_component_times["combine_cuda"] = (
+                combine_start_event.elapsed_time(combine_end_event) / 1000.0
+            )
+        else:
+            experts_component_times["combine_cuda"] = 0.0
+
+        # Expose component times so that caller (e.g., Qwen3MoeSparseMoeBlock)
+        # can aggregate them for per-layer profiling.
+        self.experts_component_times = experts_component_times
+
+        if self.reduce_results and (self.moe_tp_size > 1 or self.moe_ep_size > 1):
+            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+
+        return final_hidden_states, experts_component_times
+
+def get_moe_impl_class(quant_config: Optional[QuantizationConfig]):
+    if get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_mooncake():
+        return CustomedDeepEPMoE
+    else:
+        return CustomedFusedMoE
 
 
 def compute_yarn_parameters(
@@ -421,7 +646,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             experts_end_event = torch.cuda.Event(enable_timing=True)
             experts_start_event.record()
 
-        final_hidden_states = self.experts(hidden_states, topk_output)
+        final_hidden_states, experts_component_times = self.experts(hidden_states, topk_output)
 
         if _is_cuda:
             if experts_end_event is not None:
@@ -444,6 +669,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         ):
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
+
+        self.experts_component_times = experts_component_times
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -500,7 +727,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             experts_end_event = torch.cuda.Event(enable_timing=True)
             experts_start_event.record()
 
-        final_hidden_states = self.experts(
+        final_hidden_states, experts_component_times = self.experts(
             hidden_states=hidden_states,
             topk_output=topk_output,
         )
@@ -517,6 +744,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             )
         else:
             self.experts_time_cuda = 0.0
+
+        self.experts_component_times = experts_component_times
 
         return final_hidden_states
 
@@ -1112,9 +1341,15 @@ class Qwen3MoeDecoderLayer(nn.Module):
         if isinstance(self.mlp, Qwen3MoeSparseMoeBlock):
             times["mlp_gate"] = self.mlp.gate_time
             times["mlp_experts"] = self.mlp.experts_time
+            times["moe_dispatch"] = self.mlp.experts_component_times["dispatch"]
+            times["moe_combine"] = self.mlp.experts_component_times["combine"]
+            times["moe_core"] = self.mlp.experts_component_times["moe_core"]
             if _is_cuda:
                 times_cuda["mlp_gate"] = self.mlp.gate_time_cuda
                 times_cuda["mlp_experts"] = self.mlp.experts_time_cuda
+                times_cuda["moe_dispatch"] = self.mlp.experts_component_times["dispatch_cuda"]
+                times_cuda["moe_combine"] = self.mlp.experts_component_times["combine_cuda"]
+                times_cuda["moe_core"] = self.mlp.experts_component_times["moe_core_cuda"]
 
         if should_allreduce_fusion:
             hidden_states._sglang_needs_allreduce_fusion = True
@@ -1242,9 +1477,6 @@ class Qwen3MoeModel(Qwen2MoeModel):
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[torch.Tensor, PPProxyTensors, Tuple[torch.Tensor, List[torch.Tensor]]]:
-        # Log forward mode
-        logger.info(f"Forward mode: {forward_batch.forward_mode}")
-        
         profiling_enabled = (
             os.getenv("PROFILE_COMPONENT_OUTPUT_DIR") is not None
             or os.getenv("PROFILE_COMPONENT_BS") is not None

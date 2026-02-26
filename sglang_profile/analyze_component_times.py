@@ -78,8 +78,68 @@ def extract_components(data: Dict[str, Any]) -> Dict[str, float]:
     return components
 
 
+def filter_outliers(values: List[float]) -> List[float]:
+    """筛选掉明显大于其他值的离群值
+
+    使用 IQR (Interquartile Range) 方法检测上界离群值。
+    如果没有离群值，则返回原始数据。
+
+    Args:
+        values: 数值列表
+
+    Returns:
+        filtered_values: 筛选后的数值列表（如果没有离群值则返回原始列表）
+    """
+    if not values or len(values) < 4:
+        # 数据太少，无法有效检测离群值
+        return values
+
+    sorted_values = sorted(values)
+    n = len(sorted_values)
+
+    # 计算第一四分位数 (Q1) 和第三四分位数 (Q3)
+    # 使用标准方法：Q1 是下中位数的中位数，Q3 是上中位数的中位数
+    mid = n // 2
+    if n % 2 == 0:
+        # 偶数个元素
+        lower_half = sorted_values[:mid]
+        upper_half = sorted_values[mid:]
+    else:
+        # 奇数个元素，中位数不包含在任一半中
+        lower_half = sorted_values[:mid]
+        upper_half = sorted_values[mid + 1:]
+
+    # Q1 是下中位数
+    q1 = statistics.median(lower_half)
+    # Q3 是上中位数
+    q3 = statistics.median(upper_half)
+
+    # 计算 IQR
+    iqr = q3 - q1
+
+    # 如果 IQR 为 0，说明数据没有分散性，不需要筛选
+    if iqr == 0:
+        return values
+
+    # 计算上界阈值 (只检测明显大于其他值的离群值)
+    upper_bound = q3 + 1.5 * iqr
+
+    # 筛选掉大于阈值的值
+    filtered_values = [v for v in values if v <= upper_bound]
+
+    # 如果没有筛选掉任何值，返回原始数据
+    if len(filtered_values) == len(values):
+        return values
+    else:
+        print(f"filtered out values: {[v for v in values if v > upper_bound]}")
+
+    return filtered_values
+
+
 def calculate_statistics(values: List[float]) -> Dict[str, float]:
     """计算统计信息
+
+    在计算平均值时，会自动筛选掉明显大于其他值的离群值。
 
     Args:
         values: 数值列表
@@ -90,13 +150,26 @@ def calculate_statistics(values: List[float]) -> Dict[str, float]:
     if not values:
         return {}
 
+    # 筛选离群值用于计算平均值
+    filtered_values = filter_outliers(values)
+
+    # 使用原始值计算其他统计信息（min, max, median）
+    # 使用筛选后的值计算平均值
     stats = {
-        'count': len(values),
-        'mean': statistics.mean(values),
+        'count': len(values),  # 原始数据数量
+        'mean': statistics.mean(filtered_values),  # 使用筛选后的数据计算平均值
         'min': min(values),
         'max': max(values),
         'median': statistics.median(values),
     }
+
+    # 如果筛选掉了离群值，记录相关信息
+    if len(filtered_values) < len(values):
+        stats['outliers_removed'] = len(values) - len(filtered_values)
+        stats['filtered_count'] = len(filtered_values)
+    else:
+        stats['outliers_removed'] = 0
+        stats['filtered_count'] = len(values)
 
     if len(values) > 1:
         stats['variance'] = statistics.variance(values)
@@ -140,7 +213,7 @@ def write_component_csv(output_file: Path, component_name: str, batch_data: Dict
             ])
 
 
-def analyze_component_times(data_dir: str, output_dir: str = None, output_len: int = 4):
+def analyze_component_times(data_dir: str, output_dir: str = None, output_len: int = 4, warmup_steps: int = 3):
     """分析 component_times 数据
 
     Args:
@@ -168,7 +241,7 @@ def analyze_component_times(data_dir: str, output_dir: str = None, output_len: i
     for json_file in json_files:
         count_number = parse_count_number(json_file.name)
 
-        if count_number < output_len * 3:
+        if count_number <= output_len * warmup_steps:
             continue
 
         try:
@@ -270,10 +343,12 @@ def main():
     parser.add_argument('-o', '--output', type=str, default=None,
                         help='输出目录（默认为 data_dir/analysis）')
     parser.add_argument('--output-len', type=int, default=4, help='输出长度，默认为 4')
-
+    parser.add_argument('--warmup-steps', type=int,
+                        default=3, help='预热步骤数，默认为 3')
     args = parser.parse_args()
 
-    analyze_component_times(args.data_dir, args.output, args.output_len)
+    analyze_component_times(args.data_dir, args.output,
+                            args.output_len, args.warmup_steps)
 
 
 if __name__ == '__main__':

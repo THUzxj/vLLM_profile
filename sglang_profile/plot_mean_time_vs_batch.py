@@ -47,33 +47,53 @@ def read_component_statistics(stats_dir):
     return data_dict
 
 
-def plot_mean_time_vs_batch_size(data_dict, output_dir=None):
+def plot_time_vs_batch_size(data_dict, output_dir=None, time_type='mean'):
     """
-    绘制各个组件的mean time与batch size的关系
+    绘制各个组件的 mean/min time 与 batch size 的关系
+
+    :param data_dict: 组件统计数据
+    :param output_dir: 输出目录
+    :param time_type: 'mean' 或 'min'，控制绘制哪种时间
     """
     if not data_dict:
         print("没有数据可绘制")
         return
 
+    assert time_type in ('mean', 'min'), "time_type 必须是 'mean' 或 'min'"
+
+    # 配置不同类型的绘图样式
+    if time_type == 'mean':
+        value_key = 'means'
+        ylabel = 'Mean Time (ms)'
+        title = 'Mean Time vs Batch Size for Different Components'
+        filename = 'mean_time_vs_batch_size.png'
+        marker = 'o'
+    else:
+        value_key = 'mins'
+        ylabel = 'Min Time (ms)'
+        title = 'Min Time vs Batch Size for Different Components'
+        filename = 'min_time_vs_batch_size.png'
+        marker = 's'
+
     # 创建图表
     fig, ax = plt.subplots(figsize=(14, 8))
 
-    # 排除model_time，只绘制layer相关的组件
+    # 排除 model_time 和各层 total，只绘制具体子组件
     for component_name, data in sorted(data_dict.items()):
-        if 'model_time' not in component_name:  # 排除总的model_time
-            batch_sizes = data['batch_sizes']
-            means = data['means']
+        if 'model_time' in component_name or component_name.endswith('_total'):
+            continue
+        batch_sizes = data['batch_sizes']
+        values = data[value_key]
 
-            # 转换为毫秒（从秒转换）
-            means_ms = [m * 1000 for m in means]
+        # 转换为毫秒（从秒转换）
+        values_ms = [v * 1000 for v in values]
 
-            ax.plot(batch_sizes, means_ms, marker='o',
-                    label=component_name, linewidth=2, markersize=6)
+        ax.plot(batch_sizes, values_ms, marker=marker,
+                label=component_name, linewidth=2, markersize=6)
 
     ax.set_xlabel('Batch Size', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Mean Time (ms)', fontsize=12, fontweight='bold')
-    ax.set_title('Mean Time vs Batch Size for Different Components',
-                 fontsize=14, fontweight='bold')
+    ax.set_ylabel(ylabel, fontsize=12, fontweight='bold')
+    ax.set_title(title, fontsize=14, fontweight='bold')
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
     ax.grid(True, alpha=0.3)
 
@@ -83,22 +103,30 @@ def plot_mean_time_vs_batch_size(data_dict, output_dir=None):
     if output_dir is None:
         output_dir = os.getcwd()
 
-    output_path = os.path.join(output_dir, 'mean_time_vs_batch_size.png')
+    output_path = os.path.join(output_dir, filename)
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"图表已保存到: {output_path}")
 
     plt.show()
 
 
-def plot_individual_components(data_dict, output_dir=None):
+def plot_individual_components_time(data_dict, output_dir=None, time_type='mean'):
     """
-    为每个主要组件绘制单独的图表（更清晰的视图）
+    为每个主要组件绘制单独的 mean/min time 图表（更清晰的视图）
+
+    :param data_dict: 组件统计数据
+    :param output_dir: 输出目录
+    :param time_type: 'mean' 或 'min'，控制绘制哪种时间
     """
     if not data_dict:
         print("没有数据可绘制")
         return
 
+    assert time_type in ('mean', 'min'), "time_type 必须是 'mean' 或 'min'"
+
     # 分组绘制主要组件
+    # 参考 JSON 中的字段，新增 MoE 相关的三个组件：
+    # moe_dispatch, moe_combine, moe_core -> 对应 layer_0_moe_dispatch 等
     main_components = [
         'layer_0_total',
         'layer_0_self_attention',
@@ -106,148 +134,187 @@ def plot_individual_components(data_dict, output_dir=None):
         'layer_0_attention_prepare',
         'layer_0_attention_core',
         'layer_0_mlp_gate',
-        'layer_0_mlp_experts'
+        'layer_0_mlp_experts',
+        'layer_0_moe_dispatch',
+        'layer_0_moe_combine',
+        'layer_0_moe_core',
     ]
 
-    fig, axes = plt.subplots(2, 4, figsize=(16, 10))
-    axes = axes.flatten()
+    # 根据 time_type 配置
+    if time_type == 'mean':
+        value_key = 'means'
+        ylabel = 'Mean Time (ms)'
+        suptitle = 'Mean Time vs Batch Size - Individual Components'
+        filename = 'individual_components_analysis.png'
+        marker = 'o'
+        color = 'blue'
+    else:
+        value_key = 'mins'
+        ylabel = 'Min Time (ms)'
+        suptitle = 'Min Time vs Batch Size - Individual Components'
+        filename = 'individual_components_min_time_analysis.png'
+        marker = 's'
+        color = 'green'
+
+    # 根据组件数量自适应子图网格
+    import math
+    n_components = len(main_components)
+    n_cols = 4
+    n_rows = math.ceil(n_components / n_cols)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows))
+    if isinstance(axes, (list, tuple)):
+        axes = list(axes)
+    else:
+        axes = axes.flatten()
 
     for idx, component in enumerate(main_components):
         if component in data_dict:
             ax = axes[idx]
             batch_sizes = data_dict[component]['batch_sizes']
-            means = data_dict[component]['means']
-            means_ms = [m * 1000 for m in means]
+            values = data_dict[component][value_key]
+            values_ms = [v * 1000 for v in values]
 
-            ax.plot(batch_sizes, means_ms, marker='o',
-                    color='blue', linewidth=2, markersize=6)
-            # ax.fill_between(range(len(batch_sizes)), means_ms, alpha=0.3)
+            ax.plot(batch_sizes, values_ms, marker=marker,
+                    color=color, linewidth=2, markersize=6)
             ax.set_xlabel('Batch Size', fontsize=10)
-            ax.set_ylabel('Mean Time (ms)', fontsize=10)
+            ax.set_ylabel(ylabel, fontsize=10)
             ax.set_title(component, fontsize=11, fontweight='bold')
             ax.grid(True, alpha=0.3)
             ax.set_xticks(batch_sizes)
             ax.set_xticklabels([str(b) for b in batch_sizes], rotation=45)
             ax.set_ylim(bottom=0)  # 从0开始显示Y轴
 
-    # 隐藏最后一个未使用的子图
+    # 隐藏未使用的子图
     if len(main_components) < len(axes):
-        axes[-1].axis('off')
+        for ax in axes[len(main_components):]:
+            ax.axis('off')
 
-    plt.suptitle('Mean Time vs Batch Size - Individual Components',
-                 fontsize=14, fontweight='bold')
+    plt.suptitle(suptitle, fontsize=14, fontweight='bold')
     plt.tight_layout()
 
     if output_dir is None:
         output_dir = os.getcwd()
 
-    output_path = os.path.join(
-        output_dir, 'individual_components_analysis.png')
+    output_path = os.path.join(output_dir, filename)
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"个别组件分析图已保存到: {output_path}")
 
     plt.show()
 
 
-def plot_min_time_vs_batch_size(data_dict, output_dir=None):
+def plot_time_components_bar(
+    data_dict,
+    output_dir=None,
+    time_type='mean',
+    components=None,
+    label='',
+):
     """
-    绘制各个组件的min time与batch size的关系
+    绘制柱状图：不同 batch size 下各个组件的 mean/min time
+    x 轴为 batch size，每个 batch size 这一组里有多个 component 的柱子
+
+    :param data_dict: 组件统计数据
+    :param output_dir: 输出目录
+    :param time_type: 'mean' 或 'min'，控制绘制哪种时间
+    :param components: 要绘制的组件名列表；为 None 时默认使用所有符合条件的组件
+    :param label: 额外加入到标题和文件名中的标签，用于区分不同层级/分组
     """
     if not data_dict:
         print("没有数据可绘制")
         return
 
-    # 创建图表
-    fig, ax = plt.subplots(figsize=(14, 8))
+    assert time_type in ('mean', 'min'), "time_type 必须是 'mean' 或 'min'"
 
-    # 排除model_time，只绘制layer相关的组件
-    for component_name, data in sorted(data_dict.items()):
-        if 'model_time' not in component_name:  # 排除总的model_time
-            batch_sizes = data['batch_sizes']
-            mins = data['mins']
+    import numpy as np
 
-            # 转换为毫秒（从秒转换）
-            mins_ms = [m * 1000 for m in mins]
+    # 排除 model_time 和各层 total，只绘制具体组件（例如 layer_x_xxx）
+    if components is None:
+        components = sorted([
+                name
+                for name in data_dict.keys()
+                if 'model_time' not in name and not name.endswith('_total')
+                  and not name.endswith('_self_attention') and not name.endswith('_mlp')
+            ])
+    else:
+        # 只保留在 data_dict 中存在的组件
+        components = [name for name in components if name in data_dict]
 
-            ax.plot(batch_sizes, mins_ms, marker='s',
-                    label=component_name, linewidth=2, markersize=6)
+    if not components:
+        print("没有可用的组件数据")
+        return
+
+    # 收集所有 batch size（去重后排序）
+    all_batch_sizes = set()
+    for name in components:
+        bs = data_dict[name]['batch_sizes']
+        all_batch_sizes.update(bs)
+    all_batch_sizes = sorted(all_batch_sizes)
+
+    # 根据 time_type 选择数据和配置
+    value_key = 'means' if time_type == 'mean' else 'mins'
+    ylabel = 'Mean Time (ms)' if time_type == 'mean' else 'Min Time (ms)'
+    title = (
+        'Mean Time of Components for Each Batch Size (Bar Plot)'
+        if time_type == 'mean'
+        else 'Min Time of Components for Each Batch Size (Bar Plot)'
+    )
+    filename = (
+        'mean_time_components_bar.png'
+        if time_type == 'mean'
+        else 'min_time_components_bar.png'
+    )
+
+    # 如果传入了 label，则追加到标题和文件名中
+    if label:
+        title = f"{title} - {label}"
+        base, ext = os.path.splitext(filename)
+        filename = f"{base}_{label}{ext}"
+
+    # 构建值矩阵 (n_components, n_batch)
+    value_matrix = []
+    for name in components:
+        bs = data_dict[name]['batch_sizes']
+        values = data_dict[name][value_key]
+        values_ms = [v * 1000 for v in values]
+        value_map = {b: v for b, v in zip(bs, values_ms)}
+        row = [value_map.get(b, 0.0) for b in all_batch_sizes]
+        value_matrix.append(row)
+
+    value_matrix = np.array(value_matrix)  # shape: (n_components, n_batch)
+
+    # 现在以 batch size 作为 x 轴，一个 group 是一个 batch size，组内是多个 component
+    x = np.arange(len(all_batch_sizes))
+    total_width = 0.8
+    n_components = len(components)
+    bar_width = total_width / n_components
+
+    fig, ax = plt.subplots(figsize=(max(12, len(all_batch_sizes) * 0.8), 8))
+
+    for i, name in enumerate(components):
+        positions = x - total_width / 2 + i * bar_width + bar_width / 2
+        ax.bar(positions, value_matrix[i, :], width=bar_width, label=name)
 
     ax.set_xlabel('Batch Size', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Min Time (ms)', fontsize=12, fontweight='bold')
-    ax.set_title('Min Time vs Batch Size for Different Components',
-                 fontsize=14, fontweight='bold')
-    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
-    ax.grid(True, alpha=0.3)
+    ax.set_ylabel(ylabel, fontsize=12, fontweight='bold')
+    ax.set_title(
+        title,
+        fontsize=14,
+        fontweight='bold',
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(b) for b in all_batch_sizes], rotation=0, ha='center')
+    ax.grid(True, axis='y', alpha=0.3)
+    ax.legend(title='Component', fontsize=9)
 
-    plt.tight_layout()
-
-    # 保存图表
-    if output_dir is None:
-        output_dir = os.getcwd()
-
-    output_path = os.path.join(output_dir, 'min_time_vs_batch_size.png')
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"Min Time图表已保存到: {output_path}")
-
-    plt.show()
-
-
-def plot_individual_components_min_time(data_dict, output_dir=None):
-    """
-    为每个主要组件绘制单独的min time图表
-    """
-    if not data_dict:
-        print("没有数据可绘制")
-        return
-
-    # 分组绘制主要组件
-    main_components = [
-        'layer_0_total',
-        'layer_0_self_attention',
-        'layer_0_mlp',
-        'layer_0_attention_prepare',
-        'layer_0_attention_core',
-        'layer_0_mlp_gate',
-        'layer_0_mlp_experts'
-    ]
-
-    fig, axes = plt.subplots(2, 4, figsize=(16, 10))
-    axes = axes.flatten()
-
-    for idx, component in enumerate(main_components):
-        if component in data_dict:
-            ax = axes[idx]
-            batch_sizes = data_dict[component]['batch_sizes']
-            mins = data_dict[component]['mins']
-            mins_ms = [m * 1000 for m in mins]
-
-            ax.plot(batch_sizes, mins_ms, marker='s',
-                    color='green', linewidth=2, markersize=6)
-            # ax.fill_between(range(len(batch_sizes)), mins_ms,
-            # alpha=0.3, color='green')
-            ax.set_xlabel('Batch Size', fontsize=10)
-            ax.set_ylabel('Min Time (ms)', fontsize=10)
-            ax.set_title(component, fontsize=11, fontweight='bold')
-            ax.grid(True, alpha=0.3)
-            ax.set_xticks(batch_sizes)
-            ax.set_xticklabels([str(b) for b in batch_sizes], rotation=45)
-            ax.set_ylim(bottom=0)  # 从0开始显示Y轴
-
-    # 隐藏最后一个未使用的子图
-    if len(main_components) < len(axes):
-        axes[-1].axis('off')
-
-    plt.suptitle('Min Time vs Batch Size - Individual Components',
-                 fontsize=14, fontweight='bold')
     plt.tight_layout()
 
     if output_dir is None:
         output_dir = os.getcwd()
 
-    output_path = os.path.join(
-        output_dir, 'individual_components_min_time_analysis.png')
+    output_path = os.path.join(output_dir, filename)
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"Min Time个别组件分析图已保存到: {output_path}")
+    print(f"{'Mean' if time_type == 'mean' else 'Min'} Time 柱状图已保存到: {output_path}")
 
     plt.show()
 
@@ -337,20 +404,36 @@ if __name__ == "__main__":
         # 打印摘要
         print_summary(data_dict)
 
-        # 绘制mean time合并图表
+        # 绘制 mean time 合并折线图
         print("\n生成Mean Time折线图...")
-        plot_mean_time_vs_batch_size(data_dict, output_dir)
+        plot_time_vs_batch_size(data_dict, output_dir, time_type='mean')
 
-        # 绘制mean time单独图表
+        # 绘制 mean time 个别组件折线图
         print("生成Mean Time个别组件分析图...")
-        plot_individual_components(data_dict, output_dir)
+        plot_individual_components_time(data_dict, output_dir, time_type='mean')
 
-        # 绘制min time合并图表
+        # 绘制 min time 合并折线图
         print("生成Min Time折线图...")
-        plot_min_time_vs_batch_size(data_dict, output_dir)
+        plot_time_vs_batch_size(data_dict, output_dir, time_type='min')
 
-        # 绘制min time单独图表
+        # 绘制 min time 个别组件折线图
         print("生成Min Time个别组件分析图...")
-        plot_individual_components_min_time(data_dict, output_dir)
+        plot_individual_components_time(data_dict, output_dir, time_type='min')
+
+        # 按层级绘制 mean / min time 柱状图（组件 × batch size）
+        # 自动根据 component name 中的 layer 前缀进行分组，例如 layer_0_xxx, layer_1_xxx
+        components_groups = {
+            "coarse": ["layer_0_self_attention", "layer_0_mlp"],
+            "detailed": ["layer_0_attention_prepare", "layer_0_attention_core", "layer_0_mlp_gate", "layer_0_moe_dispatch", "layer_0_moe_core", "layer_0_moe_combine"],
+        }
+        
+        for label, components_group in components_groups.items():
+            plot_time_components_bar(
+                data_dict,
+                output_dir,
+                time_type='mean',
+                components=components_group,
+                label=label,
+            )
 
         print("\n分析完成！")
