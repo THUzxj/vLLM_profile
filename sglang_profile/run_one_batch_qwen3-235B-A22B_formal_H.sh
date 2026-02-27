@@ -107,8 +107,7 @@ python bench_one_batch_058.py \
     --result-filename $RESULT_FILENAME \
     --disable-cuda-graph \
     --chunked-prefill-size 260000 \
-    --max-total-tokens 12000000 \
-    --mem-fraction-static 0.6 \
+    --mem-fraction-static 0.8 \
     --json-model-override-args '{
         "rope_scaling": {
           "rope_type": "yarn",
