@@ -439,6 +439,10 @@ def extend_chunked_prefill(reqs, model_runner, rank_print):
     Extend requests using chunked prefill.
     All requests will be processed in chunks until all input tokens are processed.
     """
+
+    if logging_chuncked_prefill == "True":
+        print(
+            f"rank {torch.distributed.get_rank()} start extend_chunked_prefill with reqs {[req.rid for req in reqs]}=======================================================================")
     # Create real tree_cache for benchmarks
     tree_cache = create_tree_cache(model_runner)
 
@@ -480,6 +484,9 @@ def extend_chunked_prefill(reqs, model_runner, rank_print):
 
     # Process requests in chunks until all are complete
     while True:
+        if logging_chuncked_prefill == "True":
+            print(
+                f"rank {torch.distributed.get_rank()} start iteration {counter}------------------------------------------------------")
         counter += 1
         # Calculate max_prefill_tokens (use a large value for benchmark)
         max_prefill_tokens = model_runner.max_total_num_tokens
@@ -522,18 +529,30 @@ def extend_chunked_prefill(reqs, model_runner, rank_print):
                 if req.output_ids is None:
                     req.output_ids = []
                 req.init_next_round_input(tree_cache)
+
+                # Record current can_run_list length to detect whether this req
+                # is actually scheduled into the current batch. PrefillAdder can
+                # return NO_TOKEN / OTHER even after appending the req into
+                # can_run_list, so we must not rely solely on the return code.
+                prev_can_run_len = len(adder.can_run_list)
                 res = adder.add_one_req(
                     req,
                     has_chunked_req=len(chunked_reqs) > 0,
                     truncation_align_size=None,
                 )
-                if res == AddReqResult.CONTINUE:
+
+                # If can_run_list grew, this req will run in this batch.
+                if len(adder.can_run_list) > prev_can_run_len:
                     # Request was added, check if it needs chunking
-                    if adder.new_chunked_req is not None and adder.new_chunked_req.rid == req.rid:
-                        # This request needs chunking
+                    if (
+                        adder.new_chunked_req is not None
+                        and adder.new_chunked_req.rid == req.rid
+                    ):
+                        # This request needs chunking; it will be continued in
+                        # later iterations via remaining_chunked_reqs.
                         remaining_chunked_reqs[req.rid] = adder.new_chunked_req
                     else:
-                        # This request is fully processed in one chunk
+                        # This request is fully processed in this one chunk.
                         processed_req_ids.add(req.rid)
 
         if logging_chuncked_prefill == "True":
@@ -586,16 +605,26 @@ def extend_chunked_prefill(reqs, model_runner, rank_print):
         logits_output = model_runner.forward(forward_batch).logits_output
         next_token_ids = model_runner.sample(logits_output, forward_batch)
 
-        # In chunked prefill, only the last chunk (when is_chunked <= 0) returns next_token_ids
-        # For intermediate chunks, is_chunked > 0, so we don't save the results
+        # For chunked prefill, cache unfinished chunks so that prefix length
+        # grows across iterations and remaining input length strictly decreases.
+        # Any request that still appears in remaining_chunked_reqs after this
+        # iteration should be cached.
+        for req in can_run_list:
+            if req.rid in remaining_chunked_reqs:
+                tree_cache.cache_unfinished_req(req, chunked=True)
+
+        # In chunked prefill, only the last chunk (when is_chunked <= 0) returns
+        # the final next_token_ids for that request. We accumulate results only
+        # for requests that have been marked as processed in this iteration.
         if logging_chuncked_prefill == "True":
-            print(f"rank {torch.distributed.get_rank()} next_token_ids: {next_token_ids} logits_output.next_token_logits: {logits_output.next_token_logits.shape} batch {batch}")
-        # Accumulate results for requests that complete in this iteration
+            print(
+                f"rank {torch.distributed.get_rank()} next_token_ids: {next_token_ids} logits_output.next_token_logits: {logits_output.next_token_logits.shape} batch {batch}"
+            )
         for i, req in enumerate(can_run_list):
             if logging_chuncked_prefill == "True":
                 print(
-                    f"rank {torch.distributed.get_rank()} req: {req.rid} req.is_chunked: {req.is_chunked}")
-            # if req.is_chunked <= 0:
+                    f"rank {torch.distributed.get_rank()} req: {req.rid} req.is_chunked: {req.is_chunked}"
+                )
             if req.rid in processed_req_ids:
                 # This request completed in this iteration
                 req_id = req.rid
@@ -616,6 +645,10 @@ def extend_chunked_prefill(reqs, model_runner, rank_print):
             print(f"rank {torch.distributed.get_rank()} {counter}: len(chunked_reqs): {len(chunked_reqs)}, processed_req_ids: {processed_req_ids}, len(reqs): {len(reqs)}, len(processed_req_ids): {len(processed_req_ids)}")
         if len(chunked_reqs) == 0 and len(processed_req_ids) == len(reqs):
             break
+
+        if logging_chuncked_prefill == "True":
+            print(
+                f"rank {torch.distributed.get_rank()} end iteration {counter}------------------------------------------------------")
 
     # Aggregate accumulated results
     # Sort by req.rid to maintain consistent order
@@ -681,6 +714,10 @@ def extend_chunked_prefill(reqs, model_runner, rank_print):
     if logging_chuncked_prefill == "True":
         print(f"rank: {torch.distributed.get_rank()} final_next_token_ids: {final_next_token_ids} final_next_token_logits: {final_next_token_logits.shape} final_batch: {final_batch}")
     # Return the accumulated results
+
+    if logging_chuncked_prefill == "True":
+        print(
+            f"rank {torch.distributed.get_rank()} finished extend_chunked_prefill=======================================================================")
     return final_next_token_ids, final_next_token_logits, final_batch
 
 

@@ -33,26 +33,15 @@ export DISABLE_NVSHMEM=1
 export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
 
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3,4,5,6,7"}
-export DP=8
-export EP=8
-export TP=8
-
-# Component profiling environment variables
-export PROFILE_COMPONENT_OUTPUT_DIR="./results/component_times_output_${MODEL_NAME}_${DATE}"
-RESULT_FILENAME="results/sglang_deepseek_v3_bs32_il256_dp2_ep2_tp2_enabledpattn_decode_step_${DATE}.log"
-
-# Deployment Config
-# These can be overridden by environment variables if needed
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3,4,5,6,7"}
 DP=${DP:-8}
 EP=${EP:-8}
 TP=${TP:-8}
 
 # Input Config
-BS="1 2 1 2 4 8 16 32 64"
+BS="1 2 1 1 2 4 8 16 32 64"
 
 WARMUP_STEPS=3
-IL=32000
+IL=${IL:-32000}
 OL=4
 
 # Profile Config
@@ -62,6 +51,10 @@ OL=4
 
 DATA_SOURCE="sharegpt"
 PROMPT_FILE_ARGS="--prompt-file sharegpt_text.txt"
+
+# Component profiling environment variables
+export PROFILE_COMPONENT_OUTPUT_DIR="./results/component_times_output_${MODEL_NAME}_${DATE}"
+RESULT_FILENAME="results/sglang_${MODEL_NAME}_il${IL}/dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}.log"
 
 
 ENABLE_EPLB=1
@@ -86,15 +79,14 @@ BENCH_CMD="python bench_one_batch_058.py \
     --log-decode-step 1 \
     --result-filename $RESULT_FILENAME \
     --disable-cuda-graph \
-    --prompt-file sharegpt_text.txt" \
-    --chunked-prefill-size 260000 \
-    --max-total-tokens 12000000 \
-    --mem-fraction-static 0.6 \
+    --prompt-file sharegpt_text.txt \
+    --chunked-prefill-size 4096 \
+    --mem-fraction-static 0.9 \
     --json-model-override-args '{
-        "rope_scaling": {
-          "rope_type": "yarn",
-          "factor": 4.0,
-          "original_max_position_embeddings": 32768
+        \"rope_scaling\": {
+          \"rope_type\": \"yarn\",
+          \"factor\": 4.0,
+          \"original_max_position_embeddings\": 32768
         }
       }' \
     --context-length 131072 \
@@ -104,7 +96,7 @@ BENCH_CMD="python bench_one_batch_058.py \
     --moe-a2a-backend deepep \
     --deepep-mode normal \
     $CURRENT_EPLB_ARGS \
-    $LOG_ARGS
+    $LOG_ARGS"
 
 
 # Add multi-node parameters if NNODES is set

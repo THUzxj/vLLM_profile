@@ -44,10 +44,10 @@ EP=${EP:-8}
 TP=${TP:-8}
 
 # Input Config
-BS="1 2 1 2 4 8 16 32 64"
+BS="1 2 1 1 2 4 8 16 32 64"
 
 WARMUP_STEPS=3
-IL=32000
+IL=${IL:-32000}
 OL=11
 
 # Profile Config
@@ -106,8 +106,8 @@ python bench_one_batch_058.py \
     --dp $DP --ep $EP --tp $TP --enable-dp-attention \
     --result-filename $RESULT_FILENAME \
     --disable-cuda-graph \
-    --chunked-prefill-size 260000 \
-    --mem-fraction-static 0.8 \
+    --chunked-prefill-size 4096 \
+    --mem-fraction-static 0.9 \
     --json-model-override-args '{
         "rope_scaling": {
           "rope_type": "yarn",
