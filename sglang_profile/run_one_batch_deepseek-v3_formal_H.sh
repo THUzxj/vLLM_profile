@@ -134,7 +134,7 @@ if [ $IS_MASTER_NODE -eq 1 ]; then
     sleep 2
     
     python analyze_component_times.py $PROFILE_COMPONENT_OUTPUT_DIR/cuda
-    python plot_mean_time_vs_batch.py $PROFILE_COMPONENT_OUTPUT_DIR/cuda/analysis
+    # python plot_mean_time_vs_batch.py $PROFILE_COMPONENT_OUTPUT_DIR/cuda/analysis
     
     echo "[INFO] Master node: Analysis and plotting completed"
 else

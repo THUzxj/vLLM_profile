@@ -65,6 +65,13 @@ EPLB_ARGS=""
 if [ "$ENABLE_EPLB" -eq 1 ]; then
     EPLB_ARGS="--enable-eplb --enable-expert-distribution-metrics --expert-distribution-recorder-mode stat --eplb-rebalance-num-iterations 10"
 fi
+# Set EPLB args based on EP
+if [ "$EP" = "1" ]; then
+    CURRENT_EPLB_ARGS=""
+else
+    CURRENT_EPLB_ARGS=$EPLB_ARGS
+fi
+
 
 LOG_ARGS="--log-level debug --show-time-cost --log-decode-step 1"
 
@@ -74,13 +81,6 @@ RESULT_FILENAME="results/sglang_${MODEL_NAME}_il${IL}/dp${DP}_ep${EP}_tp${TP}_${
 
 mkdir -p $PROFILE_COMPONENT_OUTPUT_DIR
 mkdir -p ${RESULT_FILENAME%/*}
-
-# Set EPLB args based on EP
-if [ "$EP" = "1" ]; then
-    CURRENT_EPLB_ARGS=""
-else
-    CURRENT_EPLB_ARGS=$EPLB_ARGS
-fi
 
 echo "=========================================="
 echo "Running with $NNODES node(s): DP=$DP, EP=$EP, TP=$TP"
@@ -142,7 +142,7 @@ if [ $IS_MASTER_NODE -eq 1 ]; then
     sleep 2
     
     python analyze_component_times.py $PROFILE_COMPONENT_OUTPUT_DIR/cuda --output-len $OL
-    python plot_mean_time_vs_batch.py $PROFILE_COMPONENT_OUTPUT_DIR/cuda/analysis
+    # python plot_mean_time_vs_batch.py $PROFILE_COMPONENT_OUTPUT_DIR/cuda/analysis
     
     echo "[INFO] Master node: Analysis and plotting completed"
 else
