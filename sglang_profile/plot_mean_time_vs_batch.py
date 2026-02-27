@@ -47,13 +47,14 @@ def read_component_statistics(stats_dir):
     return data_dict
 
 
-def plot_time_vs_batch_size(data_dict, output_dir=None, time_type='mean'):
+def plot_time_vs_batch_size(data_dict, output_dir=None, time_type='mean', layer_num=None):
     """
     绘制各个组件的 mean/min time 与 batch size 的关系
 
     :param data_dict: 组件统计数据
     :param output_dir: 输出目录
     :param time_type: 'mean' 或 'min'，控制绘制哪种时间
+    :param layer_num: 指定layer编号（整数），如果指定则只绘制该layer的组件，并在文件名中包含layer number
     """
     if not data_dict:
         print("没有数据可绘制")
@@ -75,6 +76,12 @@ def plot_time_vs_batch_size(data_dict, output_dir=None, time_type='mean'):
         filename = 'min_time_vs_batch_size.png'
         marker = 's'
 
+    # 如果指定了layer_num，在文件名和标题中添加layer信息
+    if layer_num is not None:
+        title = f"{title} - Layer {layer_num}"
+        base, ext = os.path.splitext(filename)
+        filename = f"{base}_layer{layer_num}{ext}"
+
     # 创建图表
     fig, ax = plt.subplots(figsize=(14, 8))
 
@@ -82,6 +89,12 @@ def plot_time_vs_batch_size(data_dict, output_dir=None, time_type='mean'):
     for component_name, data in sorted(data_dict.items()):
         if 'model_time' in component_name or component_name.endswith('_total'):
             continue
+        
+        # 如果指定了layer_num，只绘制该layer的组件
+        if layer_num is not None:
+            if not component_name.startswith(f'layer_{layer_num}_'):
+                continue
+        
         batch_sizes = data['batch_sizes']
         values = data[value_key]
 
@@ -110,13 +123,14 @@ def plot_time_vs_batch_size(data_dict, output_dir=None, time_type='mean'):
     plt.show()
 
 
-def plot_individual_components_time(data_dict, output_dir=None, time_type='mean'):
+def plot_individual_components_time(data_dict, output_dir=None, time_type='mean', layer_num=None):
     """
     为每个主要组件绘制单独的 mean/min time 图表（更清晰的视图）
 
     :param data_dict: 组件统计数据
     :param output_dir: 输出目录
     :param time_type: 'mean' 或 'min'，控制绘制哪种时间
+    :param layer_num: 指定layer编号（整数），如果指定则只绘制该layer的组件，并在文件名中包含layer number
     """
     if not data_dict:
         print("没有数据可绘制")
@@ -124,35 +138,39 @@ def plot_individual_components_time(data_dict, output_dir=None, time_type='mean'
 
     assert time_type in ('mean', 'min'), "time_type 必须是 'mean' 或 'min'"
 
+    # 如果没有指定layer_num，默认使用layer_0
+    if layer_num is None:
+        layer_num = 0
+
     # 分组绘制主要组件
     # 参考 JSON 中的字段，新增 MoE 相关的三个组件：
-    # moe_dispatch, moe_combine, moe_core -> 对应 layer_0_moe_dispatch 等
+    # moe_dispatch, moe_combine, moe_core -> 对应 layer_X_moe_dispatch 等
     main_components = [
-        'layer_0_total',
-        'layer_0_self_attention',
-        'layer_0_mlp',
-        'layer_0_attention_prepare',
-        'layer_0_attention_core',
-        'layer_0_mlp_gate',
-        'layer_0_mlp_experts',
-        'layer_0_moe_dispatch',
-        'layer_0_moe_combine',
-        'layer_0_moe_core',
+        f'layer_{layer_num}_total',
+        f'layer_{layer_num}_self_attention',
+        f'layer_{layer_num}_mlp',
+        f'layer_{layer_num}_attention_prepare',
+        f'layer_{layer_num}_attention_core',
+        f'layer_{layer_num}_mlp_gate',
+        f'layer_{layer_num}_mlp_experts',
+        f'layer_{layer_num}_moe_dispatch',
+        f'layer_{layer_num}_moe_combine',
+        f'layer_{layer_num}_moe_core',
     ]
 
     # 根据 time_type 配置
     if time_type == 'mean':
         value_key = 'means'
         ylabel = 'Mean Time (ms)'
-        suptitle = 'Mean Time vs Batch Size - Individual Components'
-        filename = 'individual_components_analysis.png'
+        suptitle = f'Mean Time vs Batch Size - Individual Components - Layer {layer_num}'
+        filename = f'individual_components_analysis_layer{layer_num}.png'
         marker = 'o'
         color = 'blue'
     else:
         value_key = 'mins'
         ylabel = 'Min Time (ms)'
-        suptitle = 'Min Time vs Batch Size - Individual Components'
-        filename = 'individual_components_min_time_analysis.png'
+        suptitle = f'Min Time vs Batch Size - Individual Components - Layer {layer_num}'
+        filename = f'individual_components_min_time_analysis_layer{layer_num}.png'
         marker = 's'
         color = 'green'
 
@@ -209,6 +227,7 @@ def plot_time_components_bar(
     time_type='mean',
     components=None,
     label='',
+    layer_num=None,
 ):
     """
     绘制柱状图：不同 batch size 下各个组件的 mean/min time
@@ -219,6 +238,7 @@ def plot_time_components_bar(
     :param time_type: 'mean' 或 'min'，控制绘制哪种时间
     :param components: 要绘制的组件名列表；为 None 时默认使用所有符合条件的组件
     :param label: 额外加入到标题和文件名中的标签，用于区分不同层级/分组
+    :param layer_num: 指定layer编号（整数），如果指定则只绘制该layer的组件，并在文件名中包含layer number
     """
     if not data_dict:
         print("没有数据可绘制")
@@ -239,6 +259,10 @@ def plot_time_components_bar(
     else:
         # 只保留在 data_dict 中存在的组件
         components = [name for name in components if name in data_dict]
+
+    # 如果指定了layer_num，只保留该layer的组件
+    if layer_num is not None:
+        components = [name for name in components if name.startswith(f'layer_{layer_num}_')]
 
     if not components:
         print("没有可用的组件数据")
@@ -270,6 +294,12 @@ def plot_time_components_bar(
         title = f"{title} - {label}"
         base, ext = os.path.splitext(filename)
         filename = f"{base}_{label}{ext}"
+    
+    # 如果指定了layer_num，在文件名和标题中添加layer信息
+    if layer_num is not None:
+        title = f"{title} - Layer {layer_num}"
+        base, ext = os.path.splitext(filename)
+        filename = f"{base}_layer{layer_num}{ext}"
 
     # 构建值矩阵 (n_components, n_batch)
     value_matrix = []
@@ -319,6 +349,25 @@ def plot_time_components_bar(
     plt.show()
 
 
+def extract_layer_numbers(data_dict):
+    """
+    从data_dict中提取所有layer编号
+    
+    :param data_dict: 组件统计数据
+    :return: 排序后的layer编号列表
+    """
+    import re
+    layer_numbers = set()
+    
+    for component_name in data_dict.keys():
+        # 匹配 layer_X_ 格式
+        match = re.match(r'layer_(\d+)_', component_name)
+        if match:
+            layer_numbers.add(int(match.group(1)))
+    
+    return sorted(layer_numbers)
+
+
 def print_summary(data_dict):
     """
     打印数据摘要
@@ -352,12 +401,20 @@ if __name__ == "__main__":
     # 获取当前脚本所在目录
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # 检查是否有命令行参数指定分析目录
+    # 检查是否有命令行参数指定分析目录和layer number
+    layer_num = None
     if len(sys.argv) > 1:
         stats_dir = sys.argv[1]
         if not os.path.exists(stats_dir):
             print(f"指定的目录不存在: {stats_dir}")
             sys.exit(1)
+        # 检查是否有第二个参数指定layer number
+        if len(sys.argv) > 2:
+            try:
+                layer_num = int(sys.argv[2])
+            except ValueError:
+                print(f"无效的layer number: {sys.argv[2]}，应为整数")
+                sys.exit(1)
     else:
         # 查找分析结果目录
         results_dir = os.path.join(script_dir, 'results')
@@ -404,36 +461,70 @@ if __name__ == "__main__":
         # 打印摘要
         print_summary(data_dict)
 
-        # 绘制 mean time 合并折线图
-        print("\n生成Mean Time折线图...")
-        plot_time_vs_batch_size(data_dict, output_dir, time_type='mean')
+        # 如果没有指定layer_num，自动检测所有layer
+        if layer_num is None:
+            layer_numbers = extract_layer_numbers(data_dict)
+            if not layer_numbers:
+                print("未检测到layer编号，将绘制所有组件")
+                layer_numbers = [None]  # 使用None表示绘制所有layer
+        else:
+            layer_numbers = [layer_num]
 
-        # 绘制 mean time 个别组件折线图
-        print("生成Mean Time个别组件分析图...")
-        plot_individual_components_time(data_dict, output_dir, time_type='mean')
+        # 为每个layer绘制图表
+        for current_layer_num in layer_numbers:
+            layer_suffix = f" (Layer {current_layer_num})" if current_layer_num is not None else ""
+            print(f"\n{'='*80}")
+            if current_layer_num is not None:
+                print(f"正在处理 Layer {current_layer_num}")
+            else:
+                print("正在处理所有Layer")
+            print(f"{'='*80}")
 
-        # 绘制 min time 合并折线图
-        print("生成Min Time折线图...")
-        plot_time_vs_batch_size(data_dict, output_dir, time_type='min')
+            # 绘制 mean time 合并折线图
+            print("\n生成Mean Time折线图...")
+            plot_time_vs_batch_size(data_dict, output_dir, time_type='mean', layer_num=current_layer_num)
 
-        # 绘制 min time 个别组件折线图
-        print("生成Min Time个别组件分析图...")
-        plot_individual_components_time(data_dict, output_dir, time_type='min')
+            # 绘制 mean time 个别组件折线图
+            print("生成Mean Time个别组件分析图...")
+            plot_individual_components_time(data_dict, output_dir, time_type='mean', layer_num=current_layer_num)
 
-        # 按层级绘制 mean / min time 柱状图（组件 × batch size）
-        # 自动根据 component name 中的 layer 前缀进行分组，例如 layer_0_xxx, layer_1_xxx
-        components_groups = {
-            "coarse": ["layer_0_self_attention", "layer_0_mlp"],
-            "detailed": ["layer_0_attention_prepare", "layer_0_attention_core", "layer_0_mlp_gate", "layer_0_moe_dispatch", "layer_0_moe_core", "layer_0_moe_combine"],
-        }
-        
-        for label, components_group in components_groups.items():
-            plot_time_components_bar(
-                data_dict,
-                output_dir,
-                time_type='mean',
-                components=components_group,
-                label=label,
-            )
+            # 绘制 min time 合并折线图
+            print("生成Min Time折线图...")
+            plot_time_vs_batch_size(data_dict, output_dir, time_type='min', layer_num=current_layer_num)
+
+            # 绘制 min time 个别组件折线图
+            print("生成Min Time个别组件分析图...")
+            plot_individual_components_time(data_dict, output_dir, time_type='min', layer_num=current_layer_num)
+
+            # 按层级绘制 mean / min time 柱状图（组件 × batch size）
+            # 自动根据 component name 中的 layer 前缀进行分组
+            if current_layer_num is not None:
+                components_groups = {
+                    "coarse": [f"layer_{current_layer_num}_self_attention", f"layer_{current_layer_num}_mlp"],
+                    "detailed": [
+                        f"layer_{current_layer_num}_attention_prepare",
+                        f"layer_{current_layer_num}_attention_core",
+                        f"layer_{current_layer_num}_mlp_gate",
+                        f"layer_{current_layer_num}_moe_dispatch",
+                        f"layer_{current_layer_num}_moe_core",
+                        f"layer_{current_layer_num}_moe_combine"
+                    ],
+                }
+            else:
+                # 如果没有指定layer，使用layer_0作为默认值
+                components_groups = {
+                    "coarse": ["layer_0_self_attention", "layer_0_mlp"],
+                    "detailed": ["layer_0_attention_prepare", "layer_0_attention_core", "layer_0_mlp_gate", "layer_0_moe_dispatch", "layer_0_moe_core", "layer_0_moe_combine"],
+                }
+            
+            for label, components_group in components_groups.items():
+                plot_time_components_bar(
+                    data_dict,
+                    output_dir,
+                    time_type='mean',
+                    components=components_group,
+                    label=label,
+                    layer_num=current_layer_num,
+                )
 
         print("\n分析完成！")
