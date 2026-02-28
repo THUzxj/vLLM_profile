@@ -10,6 +10,12 @@ export NODE_RANK=${NODE_RANK:-${NODE_ID:-${SLURM_NODEID:-0}}}
 # Get number of nodes from environment variable (default to 1 for single node)
 export NNODES=${NNODES:-1}
 
+export ENABLE_TBO=${ENABLE_TBO:-0}
+TBO_ARGS=""
+if [ "$ENABLE_TBO" -eq 1 ]; then
+    TBO_ARGS="--enable-two-batch-overlap"
+fi
+
 # Check if this is the master node (rank 0)
 IS_MASTER_NODE=0
 if [ "$NODE_RANK" = "0" ]; then
@@ -79,8 +85,9 @@ LOG_ARGS="--log-level debug --show-time-cost --log-decode-step 1"
 export PROFILE_COMPONENT_OUTPUT_DIR="./results/component_times_output_${MODEL_NAME}_il${IL}/dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}"
 RESULT_FILENAME="results/sglang_${MODEL_NAME}_il${IL}/dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}.log"
 
-mkdir -p $PROFILE_COMPONENT_OUTPUT_DIR
-mkdir -p ${RESULT_FILENAME%/*}
+mkdir -p "$PROFILE_COMPONENT_OUTPUT_DIR"
+mkdir -p "${RESULT_FILENAME%/*}"
+mkdir -p "running_logs"
 
 echo "=========================================="
 echo "Running with $NNODES node(s): DP=$DP, EP=$EP, TP=$TP"
@@ -99,8 +106,7 @@ MULTI_NODE_ARGS=""
 if [ "$NNODES" -gt 1 ]; then
     MULTI_NODE_ARGS="--nnodes $NNODES --node-rank $NODE_RANK --dist-init-addr $DIST_INIT_ADDR"
 fi
-
-python bench_one_batch_058.py \
+BENCH_CMD="python bench_one_batch_058.py \
     --model-path $MODEL_PATH \
     --batch $BS --input-len $IL --output-len $OL \
     --dp $DP --ep $EP --tp $TP --enable-dp-attention \
@@ -109,10 +115,10 @@ python bench_one_batch_058.py \
     --chunked-prefill-size 4096 \
     --mem-fraction-static 0.9 \
     --json-model-override-args '{
-        "rope_scaling": {
-          "rope_type": "yarn",
-          "factor": 4.0,
-          "original_max_position_embeddings": 32768
+        \"rope_scaling\": {
+          \"rope_type\": \"yarn\",
+          \"factor\": 4.0,
+          \"original_max_position_embeddings\": 32768
         }
       }' \
     --context-length 131072 \
@@ -124,7 +130,10 @@ python bench_one_batch_058.py \
     $PROMPT_FILE_ARGS \
     $CURRENT_EPLB_ARGS \
     $LOG_ARGS \
-    $MULTI_NODE_ARGS
+    $MULTI_NODE_ARGS $TBO_ARGS > running_logs/run_one_batch_qwen3-235B-A22B_formal_H_dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}_${NODE_RANK}.log 2>&1"
+
+echo "[INFO] Starting benchmark... with command: $BENCH_CMD"
+eval $BENCH_CMD
 
 BENCH_EXIT_CODE=$?
 

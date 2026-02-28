@@ -5,6 +5,12 @@ export NODE_ID=${NODE_ID:-0}
 export NNODES=${NNODES:-1}
 export DIST_INIT_ADDR=${DIST_INIT_ADDR:-"172.16.4.52:20000"}
 
+export ENABLE_TBO=${ENABLE_TBO:-0}
+TBO_ARGS=""
+if [ "$ENABLE_TBO" -eq 1 ]; then
+    TBO_ARGS="--enable-two-batch-overlap"
+fi
+
 # Check if this is the first node (master node)
 IS_MASTER_NODE=0
 if [ "$NODE_ID" = "0" ]; then
@@ -71,6 +77,8 @@ fi
 
 LOG_ARGS="--log-level debug --show-time-cost --log-decode-step 1"
 
+mkdir -p "running_logs"
+
 # Build the command with multi-node parameters if needed
 BENCH_CMD="python bench_one_batch_058.py \
     --model-path $MODEL_PATH \
@@ -95,8 +103,9 @@ BENCH_CMD="python bench_one_batch_058.py \
     --eplb-rebalance-num-iterations 10 \
     --moe-a2a-backend deepep \
     --deepep-mode normal \
+    $PROMPT_FILE_ARGS \
     $CURRENT_EPLB_ARGS \
-    $LOG_ARGS"
+    $LOG_ARGS $TBO_ARGS > running_logs/run_one_batch_deepseek-v3_formal_H_dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}_${NODE_RANK}.log 2>&1"
 
 
 # Add multi-node parameters if NNODES is set
@@ -109,7 +118,7 @@ if [ -n "$NNODES" ] && [ "$NNODES" -gt 1 ]; then
 fi
 
 # Run the benchmark (all nodes execute this)
-echo "[INFO] Starting benchmark..."
+echo "[INFO] Starting benchmark... with command: $BENCH_CMD"
 eval $BENCH_CMD
 
 BENCH_EXIT_CODE=$?
