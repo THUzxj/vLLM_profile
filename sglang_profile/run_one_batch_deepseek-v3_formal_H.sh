@@ -31,7 +31,6 @@ else
     echo "[INFO] Single-node mode: NNODES=$NNODES, NODE_RANK=$NODE_RANK"
 fi
 
-
 export DATE=`date +%Y%m%d_%H%M%S`
 export MODEL_PATH="deepseek-ai/DeepSeek-V3"
 export MODEL_NAME=${MODEL_PATH##*/}
@@ -63,21 +62,20 @@ export PROFILE_COMPONENT_OUTPUT_DIR="./results/component_times_output_${MODEL_NA
 RESULT_FILENAME="results/sglang_${MODEL_NAME}_il${IL}/dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}.log"
 
 
-ENABLE_EPLB=1
-EPLB_ARGS=""
-if [ "$ENABLE_EPLB" -eq 1 ]; then
-    EPLB_ARGS="--enable-eplb --enable-expert-distribution-metrics --expert-distribution-recorder-mode stat --eplb-rebalance-num-iterations 10"
-fi
-# Set EPLB args based on EP
-if [ "$EP" = "1" ]; then
-    CURRENT_EPLB_ARGS=""
-else
-    CURRENT_EPLB_ARGS=$EPLB_ARGS
-fi
-
 LOG_ARGS="--log-level debug --show-time-cost --log-decode-step 1"
 
 mkdir -p "running_logs"
+
+# Add multi-node parameters if NNODES is set
+MULTI_NODE_ARGS=""
+if [ -n "$NNODES" ] && [ "$NNODES" -gt 1 ]; then
+    MULTI_NODE_ARGS="--nnodes $NNODES --node-rank $NODE_ID"
+    if [ -n "$DIST_INIT_ADDR" ]; then
+        MULTI_NODE_ARGS="$MULTI_NODE_ARGS --dist-init-addr $DIST_INIT_ADDR"
+    fi
+    echo "[INFO] Multi-node mode: NNODES=$NNODES, NODE_RANK=$NODE_ID"
+fi
+
 
 # Build the command with multi-node parameters if needed
 BENCH_CMD="python bench_one_batch_058.py \
@@ -87,7 +85,6 @@ BENCH_CMD="python bench_one_batch_058.py \
     --log-decode-step 1 \
     --result-filename $RESULT_FILENAME \
     --disable-cuda-graph \
-    --prompt-file sharegpt_text.txt \
     --chunked-prefill-size 4096 \
     --mem-fraction-static 0.9 \
     --json-model-override-args '{
@@ -104,18 +101,7 @@ BENCH_CMD="python bench_one_batch_058.py \
     --moe-a2a-backend deepep \
     --deepep-mode normal \
     $PROMPT_FILE_ARGS \
-    $CURRENT_EPLB_ARGS \
-    $LOG_ARGS $TBO_ARGS > running_logs/run_one_batch_deepseek-v3_formal_H_dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}_${NODE_RANK}.log 2>&1"
-
-
-# Add multi-node parameters if NNODES is set
-if [ -n "$NNODES" ] && [ "$NNODES" -gt 1 ]; then
-    BENCH_CMD="$BENCH_CMD --nnodes $NNODES --node-rank $NODE_ID"
-    if [ -n "$DIST_INIT_ADDR" ]; then
-        BENCH_CMD="$BENCH_CMD --dist-init-addr $DIST_INIT_ADDR"
-    fi
-    echo "[INFO] Multi-node mode: NNODES=$NNODES, NODE_RANK=$NODE_ID"
-fi
+    $LOG_ARGS $MULTI_NODE_ARGS $TBO_ARGS > running_logs/run_one_batch_deepseek-v3_formal_H_dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}_${NODE_RANK}.log 2>&1"
 
 # Run the benchmark (all nodes execute this)
 echo "[INFO] Starting benchmark... with command: $BENCH_CMD"

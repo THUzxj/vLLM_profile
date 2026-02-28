@@ -9,6 +9,7 @@ export NODE_RANK=${NODE_RANK:-${NODE_ID:-${SLURM_NODEID:-0}}}
 
 # Get number of nodes from environment variable (default to 1 for single node)
 export NNODES=${NNODES:-1}
+export DIST_INIT_ADDR=${DIST_INIT_ADDR:-""}
 
 export ENABLE_TBO=${ENABLE_TBO:-0}
 TBO_ARGS=""
@@ -65,20 +66,6 @@ DATA_SOURCE="sharegpt"
 PROMPT_FILE_ARGS="--prompt-file sharegpt_text.txt"
 
 # export LOGGING_CHUNCKED_PREFILL=True
-
-ENABLE_EPLB=1
-EPLB_ARGS=""
-if [ "$ENABLE_EPLB" -eq 1 ]; then
-    EPLB_ARGS="--enable-eplb --enable-expert-distribution-metrics --expert-distribution-recorder-mode stat --eplb-rebalance-num-iterations 10"
-fi
-# Set EPLB args based on EP
-if [ "$EP" = "1" ]; then
-    CURRENT_EPLB_ARGS=""
-else
-    CURRENT_EPLB_ARGS=$EPLB_ARGS
-fi
-
-
 LOG_ARGS="--log-level debug --show-time-cost --log-decode-step 1"
 
 # Setup output directories
@@ -128,9 +115,7 @@ BENCH_CMD="python bench_one_batch_058.py \
     --moe-a2a-backend deepep \
     --deepep-mode normal \
     $PROMPT_FILE_ARGS \
-    $CURRENT_EPLB_ARGS \
-    $LOG_ARGS \
-    $MULTI_NODE_ARGS $TBO_ARGS > running_logs/run_one_batch_qwen3-235B-A22B_formal_H_dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}_${NODE_RANK}.log 2>&1"
+    $LOG_ARGS $MULTI_NODE_ARGS $TBO_ARGS > running_logs/run_one_batch_qwen3-235B-A22B_formal_H_dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}_${NODE_RANK}.log 2>&1"
 
 echo "[INFO] Starting benchmark... with command: $BENCH_CMD"
 eval $BENCH_CMD
