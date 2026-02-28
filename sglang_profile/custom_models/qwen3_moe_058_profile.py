@@ -17,6 +17,7 @@
 
 """Inference-only Qwen3MoE model compatible with HuggingFace weights."""
 
+from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
 import json
 import logging
 import math
@@ -109,9 +110,6 @@ if _is_npu:
     from sgl_kernel_npu.norm.split_qkv_rmsnorm_rope import split_qkv_rmsnorm_rope
 
 
-from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
-
-
 class CustomedDeepEPMoE(DeepEPMoE):
 
     def forward_impl(self, hidden_states, topk_output):
@@ -138,7 +136,7 @@ class CustomedDeepEPMoE(DeepEPMoE):
         dispatch_output = self.dispatcher.dispatch(
             hidden_states=hidden_states, topk_output=topk_output
         )
-        
+
         if _is_cuda:
             if dispatch_end_event is not None:
                 dispatch_end_event.record()
@@ -162,7 +160,7 @@ class CustomedDeepEPMoE(DeepEPMoE):
             moe_core_start_event.record()
 
         combine_input = self.run_moe_core(dispatch_output)
-        
+
         if _is_cuda:
             if moe_core_end_event is not None:
                 moe_core_end_event.record()
@@ -203,7 +201,6 @@ class CustomedDeepEPMoE(DeepEPMoE):
             experts_component_times["combine_cuda"] = 0.0
 
         return hidden_states, experts_component_times
-
 
 
 _is_hip = is_hip()
@@ -291,7 +288,8 @@ class CustomedFusedMoE(FusedMoE):
         with use_symmetric_memory(
             get_tp_group(), disabled=not is_allocation_symmetric()
         ):
-            final_hidden_states = self.dispatcher.combine(combine_input=combine_input)
+            final_hidden_states = self.dispatcher.combine(
+                combine_input=combine_input)
 
             # TODO: should we add some conditions here?
             final_hidden_states = final_hidden_states[
@@ -316,9 +314,11 @@ class CustomedFusedMoE(FusedMoE):
         self.experts_component_times = experts_component_times
 
         if self.reduce_results and (self.moe_tp_size > 1 or self.moe_ep_size > 1):
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
 
         return final_hidden_states, experts_component_times
+
 
 def get_moe_impl_class(quant_config: Optional[QuantizationConfig]):
     if get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_mooncake():
@@ -646,7 +646,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             experts_end_event = torch.cuda.Event(enable_timing=True)
             experts_start_event.record()
 
-        final_hidden_states, experts_component_times = self.experts(hidden_states, topk_output)
+        final_hidden_states, experts_component_times = self.experts(
+            hidden_states, topk_output)
 
         if _is_cuda:
             if experts_end_event is not None:
@@ -1676,11 +1677,11 @@ class Qwen3MoeModel(Qwen2MoeModel):
                 )
 
             log_file = (
-                f"{self.output_dir}/cputime/count_{self.count}_promptlenshape_"
+                f"{self.output_dir}/il{forward_batch.origin_input_len}/cputime/count_{self.count}_promptlenshape_"
                 f"{str(input_ids.shape)}_tprank_{self.tp_rank}_time{timing_function()}.json"
             )
             log_file_cuda = (
-                f"{self.output_dir}/cuda/count_{self.count}_promptlenshape_"
+                f"{self.output_dir}/il{forward_batch.origin_input_len}/cuda/count_{self.count}_promptlenshape_"
                 f"{str(input_ids.shape)}_tprank_{self.tp_rank}_time{timing_function()}.json"
             )
 
