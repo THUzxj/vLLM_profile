@@ -52,7 +52,7 @@ EP=${EP:-8}
 TP=${TP:-8}
 
 # Input Config
-BS="1 2 1 1 2 4 8 16 32 64"
+BS="1 2 4 8 16 32 64"
 
 WARMUP_STEPS=3
 IL=${IL:-32000}
@@ -99,7 +99,7 @@ BENCH_CMD="python bench_one_batch_058.py --profile \
     --model-path $MODEL_PATH \
     --batch $BS --input-len $IL --output-len $OL \
     --dp $DP --ep $EP --tp $TP --enable-dp-attention \
-    --result-filename $RESULT_FILENAME \
+    --result-filename '$RESULT_FILENAME' \
     --disable-cuda-graph \
     --chunked-prefill-size 4096 \
     --mem-fraction-static 0.9 \
