@@ -235,13 +235,34 @@ def analyze_component_times(data_dir: str, output_dir: str = None, output_len: i
     component_data = defaultdict(lambda: defaultdict(list))
 
     # 遍历所有 JSON 文件
-    json_files = sorted(data_path.glob('*.json'))
+    json_files = list(data_path.glob('*.json'))
     print(f"找到 {len(json_files)} 个 JSON 文件")
 
+    # 第一步：收集所有文件并解析原始 count_number，按原始 count_number 排序
+    file_info_list = []
     for json_file in json_files:
-        count_number = parse_count_number(json_file.name)
+        try:
+            original_count = parse_count_number(json_file.name)
+            file_info_list.append((original_count, json_file))
+        except Exception as e:
+            print(f"解析文件 {json_file.name} 的 count_number 时出错: {e}")
+            continue
 
-        if count_number <= output_len * warmup_steps:
+    # 按原始 count_number 排序
+    file_info_list.sort(key=lambda x: x[0])
+
+    # 创建映射：原始 count -> 新 count (从 0 开始)
+    count_mapping = {}
+    for new_count, (original_count, _) in enumerate(file_info_list):
+        count_mapping[original_count] = new_count
+
+    print(f"已将 count 从 {min(count_mapping.keys()) if count_mapping else 0} 重新映射到从 0 开始")
+
+    # 第二步：使用重新映射后的 count 进行处理
+    for original_count, json_file in file_info_list:
+        new_count = count_mapping[original_count]
+
+        if new_count <= output_len * warmup_steps:
             continue
 
         try:

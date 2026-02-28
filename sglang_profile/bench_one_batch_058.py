@@ -722,12 +722,13 @@ def extend_chunked_prefill(reqs, model_runner, rank_print):
 
 
 @torch.no_grad
-def decode(input_token_ids, batch, model_runner):
+def decode(input_token_ids, batch, model_runner, input_len):
     batch.output_ids = input_token_ids
     batch.prepare_for_decode()
     _maybe_prepare_mlp_sync_batch(batch, model_runner)
     model_worker_batch = batch.get_model_worker_batch()
     forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
+    forward_batch.origin_input_len = input_len
     logits_output = model_runner.forward(forward_batch).logits_output
     next_token_ids = model_runner.sample(logits_output, forward_batch)
     return next_token_ids, logits_output.next_token_logits
@@ -932,7 +933,7 @@ def latency_test_run_once(
 
         tic = time.perf_counter()
         next_token_ids, next_token_logits = decode(
-            next_token_ids, batch, model_runner)
+            next_token_ids, batch, model_runner, input_len)
         synchronize(device)
         latency = time.perf_counter() - tic
 
@@ -1009,25 +1010,25 @@ def latency_test(
     )
 
     # Warm up
-    rank_print("Warmup ...")
-    latency_test_run_once(
-        bench_args.run_name,
-        model_runner,
-        rank_print,
-        reqs,
-        bench_args.batch_size[0],
-        bench_args.input_len[0],
-        # shorter decoding to speed up the warmup
-        min(32, bench_args.output_len[0]),
-        server_args.device,
-        log_decode_step=0,
-        profile=False,
-        profile_record_shapes=False,
-        profile_activities=("CPU", "GPU"),
-        profile_filename_prefix="",
-        profile_stage="all",
-        tp_rank=tp_rank,
-    )
+    # rank_print("Warmup ...")
+    # latency_test_run_once(
+    #     bench_args.run_name,
+    #     model_runner,
+    #     rank_print,
+    #     reqs,
+    #     bench_args.batch_size[0],
+    #     bench_args.input_len[0],
+    #     # shorter decoding to speed up the warmup
+    #     min(32, bench_args.output_len[0]),
+    #     server_args.device,
+    #     log_decode_step=0,
+    #     profile=False,
+    #     profile_record_shapes=False,
+    #     profile_activities=("CPU", "GPU"),
+    #     profile_filename_prefix="",
+    #     profile_stage="all",
+    #     tp_rank=tp_rank,
+    # )
 
     rank_print("Benchmark ...")
 

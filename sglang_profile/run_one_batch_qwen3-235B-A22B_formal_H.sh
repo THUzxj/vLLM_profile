@@ -139,10 +139,12 @@ if [ $IS_MASTER_NODE -eq 1 ]; then
     
     # Wait a bit to ensure all nodes have finished writing results
     sleep 2
-    
-    python analyze_component_times.py $PROFILE_COMPONENT_OUTPUT_DIR/cuda --output-len $OL
-    # python plot_mean_time_vs_batch.py $PROFILE_COMPONENT_OUTPUT_DIR/cuda/analysis
-    
+    # Split input_len with space, in input lengths for analysis
+    for input_len in $IL; do
+        echo "[INFO] Analyzing results for input length $input_len..."
+        python analyze_component_times.py "$PROFILE_COMPONENT_OUTPUT_DIR/il${input_len}/cuda/" --output-len $OL
+        # python plot_mean_time_vs_batch.py $PROFILE_COMPONENT_OUTPUT_DIR/cuda/analysis
+    done
     echo "[INFO] Master node: Analysis and plotting completed"
 else
     echo "[INFO] Worker node: Skipping analysis and plotting (only master node executes)"
