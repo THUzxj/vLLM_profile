@@ -113,11 +113,11 @@ if _is_npu:
 class CustomedDeepEPMoE(DeepEPMoE):
 
     def forward_impl(self, hidden_states, topk_output):
-        if self.deprecate_flag:
-            return super().forward_impl(
-                hidden_states,
-                topk_output,
-            )
+        # if self.deprecate_flag:
+        #     return super().forward_impl(
+        #         hidden_states,
+        #         topk_output,
+        #     )
 
         # TODO: can we call super().forward here?
 
