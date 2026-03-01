@@ -69,9 +69,11 @@ PROMPT_FILE_ARGS="--prompt-file sharegpt_text.txt"
 LOG_ARGS="--log-level debug --show-time-cost --log-decode-step 1"
 
 # Setup output directories
-export PROFILE_COMPONENT_OUTPUT_DIR="./results/component_times_output_${MODEL_NAME}_il${IL}/dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}"
-RESULT_FILENAME="results/sglang_${MODEL_NAME}_il${IL}/dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}.log"
-MARK_FILENAME="results/sglang_${MODEL_NAME}_il${IL}/forward_marks_dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}.json"
+RESULT_DIR="results/sglang_${MODEL_NAME}_il${IL}/dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}"
+mkdir -p "$RESULT_DIR"
+
+RESULT_FILENAME="$RESULT_DIR/result.log"
+MARK_FILENAME="$RESULT_DIR/forward_marks.json"
 
 mkdir -p "$PROFILE_COMPONENT_OUTPUT_DIR"
 mkdir -p "${RESULT_FILENAME%/*}"
@@ -95,8 +97,8 @@ if [ "$NNODES" -gt 1 ]; then
     MULTI_NODE_ARGS="--nnodes $NNODES --node-rank $NODE_RANK --dist-init-addr $DIST_INIT_ADDR"
 fi
 BENCH_CMD="
-nsys profile -o 'nsys_results/nsys_${MODEL_NAME}_dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}' \
-    --stats=true --trace-fork-before-exec=true --cuda-graph-trace=node --trace=cuda,nvtx --cuda-memory-usage=true \
+nsys profile -o '$RESULT_DIR/nsys_${MODEL_NAME}_dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}' \
+    --trace-fork-before-exec=true --cuda-graph-trace=node --trace=cuda,nvtx --cuda-memory-usage=true \
 python bench_one_batch_058.py \
     --model-path $MODEL_PATH \
     --batch $BS --input-len $IL --output-len $OL \
@@ -120,7 +122,7 @@ python bench_one_batch_058.py \
     --moe-a2a-backend deepep \
     --deepep-mode normal \
     $PROMPT_FILE_ARGS \
-    $LOG_ARGS $MULTI_NODE_ARGS $TBO_ARGS > running_logs/run_one_batch_qwen3-235B-A22B_formal_H_dp${DP}_ep${EP}_tp${TP}_${DATA_SOURCE}_${DATE}_${NODE_RANK}.log 2>&1"
+    $LOG_ARGS $MULTI_NODE_ARGS $TBO_ARGS > '$RESULT_DIR/run.log' 2>&1"
 
 echo "[INFO] Starting benchmark... with command: $BENCH_CMD"
 eval $BENCH_CMD
