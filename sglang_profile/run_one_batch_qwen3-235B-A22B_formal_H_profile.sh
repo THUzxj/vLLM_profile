@@ -111,6 +111,7 @@ BENCH_CMD="python bench_one_batch_058.py --profile \
         }
       }' \
     --context-length 131072 \
+    --ep-num-redundant-experts 32 \
     --enable-expert-distribution-metrics --enable-eplb \
     --expert-distribution-recorder-mode stat_approx \
     --eplb-rebalance-num-iterations 10 \
