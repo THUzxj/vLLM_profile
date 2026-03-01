@@ -105,7 +105,6 @@ python bench_one_batch_058.py \
     --dp $DP --ep $EP --tp $TP --enable-dp-attention \
     --result-filename '$RESULT_FILENAME' \
     --forward-marks-filename '$MARK_FILENAME' \
-    --disable-cuda-graph \
     --chunked-prefill-size 512 \
     --mem-fraction-static 0.9 \
     --json-model-override-args '{
