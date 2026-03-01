@@ -40,7 +40,6 @@ fi
 export DATE=`date +%Y%m%d_%H%M%S`
 export MODEL_PATH="Qwen/Qwen3-235B-A22B"
 export MODEL_NAME=${MODEL_PATH##*/}
-export DISABLE_NVSHMEM=1
 export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
 
 # Deployment Config
