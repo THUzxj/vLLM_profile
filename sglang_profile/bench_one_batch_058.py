@@ -98,7 +98,7 @@ from sglang.srt.models.registry import ModelRegistry
 
 
 from custom_models.deepseek_v2_058_profile import DeepseekV2ForCausalLM
-from custom_models.qwen3_moe_058_profile import Qwen3MoeForCausalLM
+from custom_models.qwen3_moe_058_nvtx import Qwen3MoeForCausalLM
 ModelRegistry.models["Qwen3MoeForCausalLM"] = Qwen3MoeForCausalLM
 ModelRegistry.models["DeepSeekV2ForCausalLM"] = DeepseekV2ForCausalLM
 
@@ -113,6 +113,10 @@ profile_activities = [torch.profiler.ProfilerActivity.CPU] + [
 ]
 
 logging_chuncked_prefill = os.environ.get("LOGGING_CHUNCKED_PREFILL", "False")
+
+
+global_forward_count = 0
+global_forward_marks = {}
 
 
 def start_profile(profile_activities, profile_record_shapes=False, rank_print=print):
@@ -194,6 +198,7 @@ class BenchArgs:
     profile_activities: Tuple[str] = ("CPU", "GPU")
     profile_stage: str = "all"
     profile_filename_prefix: str = "profile"
+    mark_filename: str = "forward_marks.json"
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -212,6 +217,9 @@ class BenchArgs:
         )
         parser.add_argument(
             "--result-filename", type=str, default=BenchArgs.result_filename
+        )
+        parser.add_argument(
+            "--mark-filename", type=str, default=BenchArgs.mark_filename
         )
         parser.add_argument("--correctness-test", action="store_true")
         parser.add_argument("--cut-len", type=int, default=BenchArgs.cut_len)
@@ -429,6 +437,10 @@ def extend(reqs, model_runner):
     model_worker_batch = batch.get_model_worker_batch()
     forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
     logits_output = model_runner.forward(forward_batch).logits_output
+
+    global global_forward_count, global_forward_marks
+    global_forward_marks[global_forward_count] = 0
+    global_forward_count += 1
     next_token_ids = model_runner.sample(logits_output, forward_batch)
     return next_token_ids, logits_output.next_token_logits, batch
 
@@ -605,6 +617,10 @@ def extend_chunked_prefill(reqs, model_runner, rank_print):
         logits_output = model_runner.forward(forward_batch).logits_output
         next_token_ids = model_runner.sample(logits_output, forward_batch)
 
+        global global_forward_count, global_forward_marks
+        global_forward_marks[global_forward_count] = 0
+        global_forward_count += 1
+
         # For chunked prefill, cache unfinished chunks so that prefix length
         # grows across iterations and remaining input length strictly decreases.
         # Any request that still appears in remaining_chunked_reqs after this
@@ -730,6 +746,10 @@ def decode(input_token_ids, batch, model_runner, input_len):
     forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
     forward_batch.origin_input_len = input_len
     logits_output = model_runner.forward(forward_batch).logits_output
+
+    global global_forward_count, global_forward_marks
+    global_forward_marks[global_forward_count] = 1
+    global_forward_count += 1
     next_token_ids = model_runner.sample(logits_output, forward_batch)
     return next_token_ids, logits_output.next_token_logits
 
@@ -1193,3 +1213,5 @@ if __name__ == "__main__":
     finally:
         if server_args.tp_size != 1:
             kill_process_tree(os.getpid(), include_parent=False)
+
+        json.dump(global_forward_marks, open(bench_args.mark_filename, "w"))
