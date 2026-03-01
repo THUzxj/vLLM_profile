@@ -104,7 +104,7 @@ python bench_one_batch_058.py \
     --batch $BS --input-len $IL --output-len $OL \
     --dp $DP --ep $EP --tp $TP --enable-dp-attention \
     --result-filename '$RESULT_FILENAME' \
-    --forward-marks-filename '$MARK_FILENAME' \
+    --mark-filename '$MARK_FILENAME' \
     --chunked-prefill-size 512 \
     --mem-fraction-static 0.9 \
     --json-model-override-args '{
