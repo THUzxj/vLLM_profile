@@ -66,6 +66,7 @@ fi
 
 # Build the command with multi-node parameters if needed
 BENCH_CMD="python bench_one_batch_058.py \
+    --profile --custom-models-mode torchprofile \
     --model-path $MODEL_PATH \
     --batch $BS --input-len $IL --output-len $OL \
     --dp $DP --ep $EP --tp $TP --enable-dp-attention \
