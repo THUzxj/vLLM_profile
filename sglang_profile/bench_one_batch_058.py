@@ -97,10 +97,49 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 from sglang.srt.models.registry import ModelRegistry
 
 
-from custom_models.deepseek_v2_058_profile import DeepseekV2ForCausalLM
-from custom_models.qwen3_moe_058_nvtx import Qwen3MoeForCausalLM
-ModelRegistry.models["Qwen3MoeForCausalLM"] = Qwen3MoeForCausalLM
-ModelRegistry.models["DeepSeekV2ForCausalLM"] = DeepseekV2ForCausalLM
+def import_custom_models(custom_models_path: str, mode: str = "torchprofile"):
+    """
+    Import custom models from the specified path and register them to ModelRegistry.
+
+    Args:
+        custom_models_path: Path to the directory containing custom model files.
+        mode: Mode for importing custom models: "torchprofile" or "nvtx".
+    """
+    import sys
+    from pathlib import Path
+
+    custom_path = Path(custom_models_path)
+    if not custom_path.exists():
+        print(f"Warning: Custom models path '{custom_models_path}' does not exist.")
+        return
+
+    # Add the custom models path to sys.path for imports
+    parent_dir = str(custom_path.parent)
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+
+    package_name = custom_path.name
+
+    # Import DeepseekV2ForCausalLM
+    try:
+        module = __import__(f"{package_name}.deepseek_v2_058_{mode}", fromlist=["DeepseekV2ForCausalLM"])
+        DeepseekV2ForCausalLM = module.DeepseekV2ForCausalLM
+        ModelRegistry.models["DeepSeekV2ForCausalLM"] = DeepseekV2ForCausalLM
+        print(f"Successfully imported DeepseekV2ForCausalLM from {custom_models_path}")
+    except ImportError as e:
+        print(f"Failed to import DeepseekV2ForCausalLM: {e}")
+
+    # Import Qwen3MoeForCausalLM
+    try:
+        module = __import__(f"{package_name}.qwen3_moe_058_{mode}", fromlist=["Qwen3MoeForCausalLM"])
+        Qwen3MoeForCausalLM = module.Qwen3MoeForCausalLM
+        ModelRegistry.models["Qwen3MoeForCausalLM"] = Qwen3MoeForCausalLM
+        print(f"Successfully imported Qwen3MoeForCausalLM from {package_name}.qwen3_moe_058_{mode}")
+    except ImportError as e:
+        print(f"Failed to import Qwen3MoeForCausalLM: {e}")
+
+
+# Import custom models (will be called with args.custom_models_path in main)
 
 
 profile_activities = [torch.profiler.ProfilerActivity.CPU] + [
@@ -199,6 +238,8 @@ class BenchArgs:
     profile_stage: str = "all"
     profile_filename_prefix: str = "profile"
     mark_filename: str = "forward_marks.json"
+    custom_models_path: str = "custom_models"
+    custom_models_mode: str = "torchprofile"
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -220,6 +261,19 @@ class BenchArgs:
         )
         parser.add_argument(
             "--mark-filename", type=str, default=BenchArgs.mark_filename
+        )
+        parser.add_argument(
+            "--custom-models-path",
+            type=str,
+            default=BenchArgs.custom_models_path,
+            help="Path to the custom models directory for importing customized models.",
+        )
+        parser.add_argument(
+            "--custom-models-mode",
+            type=str,
+            default="torchprofile",
+            choices=["torchprofile", "nvtx"],
+            help="Mode for importing custom models: torchprofile or nvtx.",
         )
         parser.add_argument("--correctness-test", action="store_true")
         parser.add_argument("--cut-len", type=int, default=BenchArgs.cut_len)
@@ -817,6 +871,8 @@ def correctness_test(
     configure_logger(server_args, prefix=f" TP{tp_rank}")
     rank_print = print if tp_rank == 0 else lambda *args, **kwargs: None
 
+    import_custom_models(bench_args.custom_models_path,
+                         bench_args.custom_models_mode)
     # Load the model
     model_runner, tokenizer = load_model(
         server_args, port_args, gpu_id, tp_rank)
@@ -1020,6 +1076,7 @@ def latency_test(
     configure_logger(server_args, prefix=f" TP{tp_rank}")
     rank_print = print if tp_rank == 0 else lambda *args, **kwargs: None
 
+    import_custom_models(bench_args.custom_models_path, bench_args.custom_models_mode)
     # Load the model
     model_runner, tokenizer = load_model(
         server_args, port_args, gpu_id, tp_rank)
@@ -1202,6 +1259,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     server_args = ServerArgs.from_cli_args(args)
     bench_args = BenchArgs.from_cli_args(args)
+
+    # Import custom models from the specified path
+    import_custom_models(args.custom_models_path, mode=args.custom_models_mode)
 
     logging.basicConfig(
         level=getattr(logging, server_args.log_level.upper()),
