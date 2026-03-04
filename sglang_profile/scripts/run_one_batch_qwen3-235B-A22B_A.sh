@@ -41,7 +41,6 @@ declare -a TPS=(4)
 # BS="1 2 4 8 16 32 64 128"
 # BS="1 2 1 2 4 8 10 12 14 16 18 18 18 20 22 24 32 40 64 128 256 512 1024"
 BS="4"
-WARMUP_STEPS=3
 IL="1000"
 # IL=32000
 OL=11
@@ -86,8 +85,7 @@ for i in "${!NODES[@]}"; do
         --batch $BS --input-len $IL --output-len $OL \
         --dp $DP --ep $EP --tp $TP --enable-dp-attention \
         --result-filename "$RESULT_FILENAME" \
-        --chunked-prefill-size 4096 \
-        --mem-fraction-static 0.8 \
+        $MEM_ARGS \
         $PROMPT_FILE_ARGS \
         "${LONG_CONTEXT_ARGS[@]}" \
         $CURRENT_EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
