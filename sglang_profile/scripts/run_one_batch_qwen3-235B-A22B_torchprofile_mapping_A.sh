@@ -80,8 +80,8 @@ for i in "${!NODES[@]}"; do
     else
         CURRENT_EPLB_ARGS=$EPLB_ARGS
     fi
-    python bench_one_batch_058.py --profile \
-        --custom-models-mode torchprofile \
+    python bench_one_batch_058.py \
+        $TORCH_PROFILER_ARGS \
         --model-path $MODEL_PATH \
         --batch $BS --input-len $IL --output-len $OL \
         --dp $DP --ep $EP --tp $TP --enable-dp-attention \

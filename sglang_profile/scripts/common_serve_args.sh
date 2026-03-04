@@ -59,6 +59,8 @@ if [ "$ENABLE_TBO" -eq 1 ]; then
     TBO_ARGS="--enable-two-batch-overlap"
 fi
 
+TORCH_PROFILE_ARGS="--profile --custom-models-mode torchprofile"
+
 # export values
 # export LOGGING_CHUNCKED_PREFILL=True
 export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
