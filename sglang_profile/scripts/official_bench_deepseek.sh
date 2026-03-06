@@ -1,5 +1,5 @@
 export DATE=`date +%Y%m%d_%H%M%S`
-export MODEL_PATH="deepseek-ai/DeepSeek-V3"
+export MODEL_PATH=${MODEL_PATH:-"deepseek-ai/DeepSeek-V3"}
 export MODEL_NAME=${MODEL_PATH##*/}
 export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
 
