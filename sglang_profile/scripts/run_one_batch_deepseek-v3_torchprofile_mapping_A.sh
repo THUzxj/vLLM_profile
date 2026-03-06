@@ -1,5 +1,5 @@
 
-ARCHITECTURE="H"
+ARCHITECTURE="A"
 ENABLE_EPLB=1
 ENABLE_EXPERT_DISTRIBUTION_METRICS=0
 
@@ -31,7 +31,7 @@ else
 fi
 
 export DATE=`date +%Y%m%d_%H%M%S`
-export MODEL_PATH="deepseek-ai/DeepSeek-V3"
+export MODEL_PATH="/nfs/xjzhang/deepseek-ai/deepseek-v3-1layer-new-remapped"
 export MODEL_NAME=${MODEL_PATH##*/}
 
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3,4,5,6,7"}
@@ -55,7 +55,6 @@ mkdir -p "$RESULT_DIR"
 
 RESULT_FILENAME="$RESULT_DIR/result.log"
 
-
 # Add multi-node parameters if NNODES is set
 MULTI_NODE_ARGS=""
 if [ -n "$NNODES" ] && [ "$NNODES" -gt 1 ]; then
@@ -75,12 +74,12 @@ python bench_one_batch_058.py \
     --model-path $MODEL_PATH \
     --batch $BS --input-len $IL --output-len $OL \
     --dp $DP --ep $EP --tp $TP --enable-dp-attention \
-    --result-filename "$RESULT_FILENAME" \
+    --result-filename $RESULT_FILENAME \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
     $PROMPT_FILE_ARGS \
-    $LOG_ARGS $MULTI_NODE_ARGS $TBO_ARGS > $RESULT_DIR/run.log 2>&1
+    $LOG_ARGS $MULTI_NODE_ARGS $TBO_ARGS 2>&1 | tee $RESULT_DIR/run.log
 set +x
 
 BENCH_EXIT_CODE=$?

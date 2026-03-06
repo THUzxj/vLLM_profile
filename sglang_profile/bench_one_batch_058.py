@@ -237,7 +237,7 @@ class BenchArgs:
     profile_activities: Tuple[str] = ("CPU", "GPU")
     profile_stage: str = "all"
     profile_filename_prefix: str = "profile"
-    mark_filename: str = "forward_marks.json"
+    mark_filename: str = None
     custom_models_path: str = "custom_models"
     custom_models_mode: str = "torchprofile"
 
@@ -1274,4 +1274,5 @@ if __name__ == "__main__":
         if server_args.tp_size != 1:
             kill_process_tree(os.getpid(), include_parent=False)
 
-        json.dump(global_forward_marks, open(bench_args.mark_filename, "w"))
+        if bench_args.mark_filename:
+            json.dump(global_forward_marks, open(bench_args.mark_filename, "w"))

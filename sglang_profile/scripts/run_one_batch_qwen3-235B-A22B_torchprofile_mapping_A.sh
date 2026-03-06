@@ -69,7 +69,6 @@ for i in "${!NODES[@]}"; do
     echo "=========================================="
 
     RESULT_FILENAME="$RESULT_DIR/result.jsonl"
-    MARK_FILENAME="$RESULT_DIR/forward_marks.json"
 
     export SGLANG_TORCH_PROFILER_DIR="$RESULT_DIR/torch_profile"
 
@@ -87,7 +86,6 @@ for i in "${!NODES[@]}"; do
         --batch $BS --input-len $IL --output-len $OL \
         --dp $DP --ep $EP --tp $TP --enable-dp-attention \
         --result-filename "$RESULT_FILENAME" \
-        --mark-filename "$MARK_FILENAME" \
         $MEM_ARGS \
         $PROMPT_FILE_ARGS \
         "${LONG_CONTEXT_ARGS[@]}" \

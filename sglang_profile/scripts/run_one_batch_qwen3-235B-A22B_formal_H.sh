@@ -61,11 +61,6 @@ RESULT_DIR="results/sglang_${MODEL_NAME}_il${IL}/dp${DP}_ep${EP}_tp${TP}_${DATA_
 mkdir -p "$RESULT_DIR"
 
 RESULT_FILENAME="$RESULT_DIR/result.log"
-MARK_FILENAME="$RESULT_DIR/forward_marks.json"
-
-mkdir -p "$PROFILE_COMPONENT_OUTPUT_DIR"
-mkdir -p "${RESULT_FILENAME%/*}"
-mkdir -p "running_logs"
 
 echo "=========================================="
 echo "Running with $NNODES node(s): DP=$DP, EP=$EP, TP=$TP"
@@ -91,7 +86,7 @@ python bench_one_batch_058.py \
     --model-path $MODEL_PATH \
     --batch $BS --input-len $IL --output-len $OL \
     --dp $DP --ep $EP --tp $TP --enable-dp-attention \
-    --result-filename '$RESULT_FILENAME' \
+    --result-filename "$RESULT_FILENAME" \
     $MEM_ARGS \
     $PROMPT_FILE_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
