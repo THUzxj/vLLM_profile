@@ -24,7 +24,7 @@ RESULT_FILENAME="$RESULT_DIR/result.log"
 # Build the command with multi-node parameters if needed
 
 set -x
-python bench_one_batch_058.py \
+python launch_server_058.py \
     --model-path $MODEL_PATH \
     --dp $DP --ep $EP --tp $TP --enable-dp-attention \
     $MEM_ARGS \
