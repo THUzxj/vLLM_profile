@@ -84,7 +84,9 @@ MULTI_NODE_ARGS=""
 if [ "$NNODES" -gt 1 ]; then
     MULTI_NODE_ARGS="--nnodes $NNODES --node-rank $NODE_RANK --dist-init-addr $DIST_INIT_ADDR"
 fi
-BENCH_CMD="python bench_one_batch_058.py \
+
+set -x
+python bench_one_batch_058.py \
     $TORCH_PROFILER_ARGS \
     --model-path $MODEL_PATH \
     --batch $BS --input-len $IL --output-len $OL \
@@ -94,10 +96,8 @@ BENCH_CMD="python bench_one_batch_058.py \
     $PROMPT_FILE_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
-    $LOG_ARGS $MULTI_NODE_ARGS $TBO_ARGS > $RESULT_DIR/run.logs 2>&1"
-
-echo "[INFO] Starting benchmark... with command: $BENCH_CMD"
-eval $BENCH_CMD
+    $LOG_ARGS $MULTI_NODE_ARGS $TBO_ARGS > $RESULT_DIR/run.logs 2>&1
+set +x
 
 BENCH_EXIT_CODE=$?
 

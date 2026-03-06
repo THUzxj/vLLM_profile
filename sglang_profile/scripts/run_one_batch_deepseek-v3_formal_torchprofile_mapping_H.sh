@@ -65,7 +65,9 @@ fi
 
 
 # Build the command with multi-node parameters if needed
-BENCH_CMD="python bench_one_batch_058.py \
+
+set -x
+python bench_one_batch_058.py \
     --profile --custom-models-mode torchprofile \
     --model-path $MODEL_PATH \
     --batch $BS --input-len $IL --output-len $OL \
@@ -76,11 +78,8 @@ BENCH_CMD="python bench_one_batch_058.py \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
     $PROMPT_FILE_ARGS \
-    $LOG_ARGS $MULTI_NODE_ARGS $TBO_ARGS > $RESULT_DIR/run.log 2>&1"
-
-# Run the benchmark (all nodes execute this)
-echo "[INFO] Starting benchmark... with command: $BENCH_CMD"
-eval $BENCH_CMD
+    $LOG_ARGS $MULTI_NODE_ARGS $TBO_ARGS > $RESULT_DIR/run.log 2>&1
+set +x
 
 BENCH_EXIT_CODE=$?
 if [ $BENCH_EXIT_CODE -ne 0 ]; then

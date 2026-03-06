@@ -41,7 +41,7 @@ declare -a TPS=(4)
 
 # BS="1 2 4 8 16 32 64 128"
 # BS="1 2 4 8 16 32 64"
-BS="4"
+BS="4 16 64"
 # BS="1 2 1 2 4 8 10 12 14 16 18 18 18 20 22 24 32 40 64 128 256 512 1024"
 # BS="4"
 WARMUP_STEPS=3
@@ -80,6 +80,7 @@ for i in "${!NODES[@]}"; do
     else
         CURRENT_EPLB_ARGS=$EPLB_ARGS
     fi
+    set -x
     python bench_one_batch_058.py \
         $TORCH_PROFILER_ARGS \
         --model-path $MODEL_PATH \
@@ -92,4 +93,6 @@ for i in "${!NODES[@]}"; do
         "${LONG_CONTEXT_ARGS[@]}" \
         $CURRENT_EPLB_ARGS \
         $LOG_ARGS --disable-cuda-graph > "$RESULT_DIR/run.log" 2>&1
+    
+    set +x
 done
