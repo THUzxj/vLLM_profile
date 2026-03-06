@@ -6,7 +6,7 @@ ENABLE_EXPERT_DISTRIBUTION_METRICS=0
 # For Ampere GPUs, disable DeepEP
 
 export DATE=`date +%Y%m%d_%H%M%S`
-export MODEL_PATH="/nfs/xjzhang/Qwen/Qwen3-235B-A22B-1layer-new2"
+export MODEL_PATH=${MODEL_PATH:-"/nfs/xjzhang/Qwen/Qwen3-235B-A22B-1layer-new2"}
 export MODEL_NAME=${MODEL_PATH##*/}
 
 # Deployment Configs to traverse

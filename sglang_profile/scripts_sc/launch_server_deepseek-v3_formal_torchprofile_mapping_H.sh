@@ -31,7 +31,7 @@ else
 fi
 
 export DATE=`date +%Y%m%d_%H%M%S`
-export MODEL_PATH="deepseek-ai/DeepSeek-V3"
+export MODEL_PATH=${MODEL_PATH:-"deepseek-ai/DeepSeek-V3"}
 export MODEL_NAME=${MODEL_PATH##*/}
 
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3,4,5,6,7"}
