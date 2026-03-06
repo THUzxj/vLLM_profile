@@ -67,3 +67,20 @@ TORCH_PROFILE_ARGS="--profile --custom-models-mode torchprofile"
 # export values
 # export LOGGING_CHUNCKED_PREFILL=True
 export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
+
+
+# distribution settings
+NODE_RANK=${RANK:-0}
+NNODES=${WORLD_SIZE:-1}
+GPUS_PER_NODE=${KUBERNETES_CONTAINER_RESOURCE_GPU:-8}
+MASTER_ADDR=${MASTER_ADDR:-localhost}
+MASTER_PORT=${MASTER_PORT:-29500}
+
+MULTI_NODE_ARGS=""
+if [ "$NNODES" -gt 1 ]; then
+    MULTI_NODE_ARGS="--nnodes $NNODES --node-rank $NODE_RANK --dist-init-addr $MASTER_ADDR:$MASTER_PORT"
+    echo "[INFO] Multi-node mode: NNODES=$NNODES, NODE_RANK=$NODE_RANK, DIST_INIT_ADDR=$MASTER_ADDR:$MASTER_PORT"
+else 
+    echo "[INFO] Single-node mode: NNODES=$NNODES, NODE_RANK=$NODE_RANK"
+fi
+

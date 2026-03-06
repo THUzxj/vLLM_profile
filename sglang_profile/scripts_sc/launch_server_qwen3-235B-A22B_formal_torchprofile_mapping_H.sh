@@ -5,35 +5,6 @@ ENABLE_EXPERT_DISTRIBUTION_METRICS=1
 
 # For Ampere GPUs, disable DeepEP
 
-# Multi-node configuration
-# Get node rank from environment variables (support multiple common names)
-# Priority: NODE_RANK > NODE_ID > SLURM_NODEID > default 0
-export NODE_RANK=${NODE_RANK:-${NODE_ID:-${SLURM_NODEID:-0}}}
-
-# Get number of nodes from environment variable (default to 1 for single node)
-export NNODES=${NNODES:-1}
-export DIST_INIT_ADDR=${DIST_INIT_ADDR:-""}
-
-# Check if this is the master node (rank 0)
-IS_MASTER_NODE=0
-if [ "$NODE_RANK" = "0" ]; then
-    IS_MASTER_NODE=1
-    echo "[INFO] Running as master node (NODE_RANK=0)"
-else
-    echo "[INFO] Running as worker node (NODE_RANK=$NODE_RANK)"
-fi
-
-# Validate multi-node configuration
-if [ "$NNODES" -gt 1 ]; then
-    if [ -z "$DIST_INIT_ADDR" ]; then
-        echo "[ERROR] DIST_INIT_ADDR must be set for multi-node mode (e.g., export DIST_INIT_ADDR=192.168.0.1:5000)"
-        exit 1
-    fi
-    echo "[INFO] Multi-node mode: NNODES=$NNODES, NODE_RANK=$NODE_RANK, DIST_INIT_ADDR=$DIST_INIT_ADDR"
-else
-    echo "[INFO] Single-node mode: NNODES=$NNODES, NODE_RANK=$NODE_RANK"
-fi
-
 export DATE=`date +%Y%m%d_%H%M%S`
 export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-235B-A22B"}
 export MODEL_NAME=${MODEL_PATH##*/}
@@ -45,19 +16,12 @@ DP=${DP:-8}
 EP=${EP:-8}
 TP=${TP:-8}
 
-# Input Config
-BS="4 16 64"
-
-WARMUP_STEPS=3
-IL=${IL:-32000}
-OL=11
-
 # Source common arguments
 source "$(dirname "$0")/common_serve_args.sh"
 
 
 # Setup output directories
-RESULT_DIR="results/sglang_${MODEL_NAME}_il${IL}/dp${DP}_ep${EP}_tp${TP}_${DATE}"
+RESULT_DIR="results/sglang_${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_${DATE}"
 mkdir -p "$RESULT_DIR"
 
 RESULT_FILENAME="$RESULT_DIR/result.log"

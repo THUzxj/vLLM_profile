@@ -3,33 +3,6 @@ ARCHITECTURE="H"
 ENABLE_EPLB=1
 ENABLE_EXPERT_DISTRIBUTION_METRICS=0
 
-# Multi-node configuration
-# NODE_ID: 0 for the first node (master), 1, 2, ... for other nodes
-# If not set, default to 0 (single node mode)
-export NODE_ID=${NODE_ID:-0}
-export NNODES=${NNODES:-1}
-export DIST_INIT_ADDR=${DIST_INIT_ADDR:-"172.16.4.52:20000"}
-
-# Check if this is the first node (master node)
-IS_MASTER_NODE=0
-if [ "$NODE_ID" = "0" ]; then
-    IS_MASTER_NODE=1
-    echo "[INFO] Running as master node (NODE_ID=0)"
-else
-    echo "[INFO] Running as worker node (NODE_ID=$NODE_ID)"
-fi
-
-# Validate multi-node configuration
-if [ "$NNODES" -gt 1 ]; then
-    if [ -z "$DIST_INIT_ADDR" ]; then
-        echo "[ERROR] DIST_INIT_ADDR must be set for multi-node mode (e.g., export DIST_INIT_ADDR=192.168.0.1:5000)"
-        exit 1
-    fi
-    echo "[INFO] Multi-node mode: NNODES=$NNODES, NODE_RANK=$NODE_RANK, DIST_INIT_ADDR=$DIST_INIT_ADDR"
-else
-    echo "[INFO] Single-node mode: NNODES=$NNODES, NODE_RANK=$NODE_RANK"
-fi
-
 export DATE=`date +%Y%m%d_%H%M%S`
 export MODEL_PATH=${MODEL_PATH:-"deepseek-ai/DeepSeek-V3"}
 export MODEL_NAME=${MODEL_PATH##*/}
@@ -47,18 +20,6 @@ RESULT_DIR="results/sglang_${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_${DATE}"
 mkdir -p "$RESULT_DIR"
 
 RESULT_FILENAME="$RESULT_DIR/result.log"
-
-
-# Add multi-node parameters if NNODES is set
-MULTI_NODE_ARGS=""
-if [ -n "$NNODES" ] && [ "$NNODES" -gt 1 ]; then
-    MULTI_NODE_ARGS="--nnodes $NNODES --node-rank $NODE_ID"
-    if [ -n "$DIST_INIT_ADDR" ]; then
-        MULTI_NODE_ARGS="$MULTI_NODE_ARGS --dist-init-addr $DIST_INIT_ADDR"
-    fi
-    echo "[INFO] Multi-node mode: NNODES=$NNODES, NODE_RANK=$NODE_ID"
-fi
-
 
 # Build the command with multi-node parameters if needed
 
