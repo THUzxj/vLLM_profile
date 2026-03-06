@@ -69,7 +69,7 @@ python bench_one_batch_058.py \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
-    $LOG_ARGS $MULTI_NODE_ARGS $TBO_ARGS > $RESULT_DIR/run.log 2>&1
+    $LOG_ARGS $MULTI_NODE_ARGS $TBO_ARGS 2>&1 | tee $RESULT_DIR/run.log 
 set +x
 
 BENCH_EXIT_CODE=$?
