@@ -9,6 +9,10 @@ export DATE=`date +%Y%m%d_%H%M%S`
 export MODEL_PATH=${MODEL_PATH:-"/nfs/xjzhang/Qwen/Qwen3-235B-A22B-1layer-new2"}
 export MODEL_NAME=${MODEL_PATH##*/}
 
+# Allow RESULT_DIR to be passed from external script
+# If not provided, use default pattern
+# Usage: RESULT_DIR=/path/to/results ./launch_server.sh
+
 # Deployment Configs to traverse
 # declare -a NODES=(1 2 4)
 # declare -a CUDA_DEVICES=("2" "2,3" "0,1,2,3")
@@ -43,8 +47,11 @@ for i in "${!NODES[@]}"; do
     DP="${DPS[$i]}"
     EP="${EPS[$i]}"
     TP="${TPS[$i]}"
-    
-    RESULT_DIR="results_v3/server/sglang_${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_${DATE}"
+
+    # Use external RESULT_DIR if provided, otherwise generate default
+    if [ -z "$RESULT_DIR" ]; then
+        RESULT_DIR="results_v3/server/sglang_${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_${DATE}"
+    fi
     mkdir -p "$RESULT_DIR"
 
     echo "=========================================="

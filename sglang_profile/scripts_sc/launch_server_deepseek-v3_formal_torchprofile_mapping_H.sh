@@ -15,8 +15,14 @@ TP=${TP:-8}
 # Source common arguments
 source "$(dirname "$0")/common_serve_args.sh"
 
+# Allow RESULT_DIR to be passed from external script
+# If not provided, use default pattern
+# Usage: RESULT_DIR=/path/to/results ./launch_server_deepseek-v3_formal_torchprofile_mapping_H.sh
+
 # Setup output directories
-RESULT_DIR="results_v3/server/sglang_${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_${DATE}"
+if [ -z "$RESULT_DIR" ]; then
+    RESULT_DIR="results_v3/server/sglang_${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_${DATE}"
+fi
 mkdir -p "$RESULT_DIR"
 
 RESULT_FILENAME="$RESULT_DIR/result.log"

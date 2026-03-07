@@ -7,9 +7,16 @@ export DATE=`date +%Y%m%d_%H%M%S`
 MODEL_PATH=${MODEL_PATH:-"/nfs/xjzhang/Qwen/Qwen3-235B-A22B-1layer-new2"}
 export MODEL_NAME=${MODEL_PATH##*/}
 
+# Allow RESULT_DIR to be passed from external script
+# If not provided, use default pattern
+# Usage: RESULT_DIR=/path/to/results ./bench_one_batch_server_profile.sh
+
 DEPLOYMENT_TAG=${DEPLOYMENT_TAG:-"default"}
 
-RESULT_DIR="results_v3/client/sglang_${MODEL_NAME}_il${IL}/${DEPLOYMENT_TAG}_${DATE}"
+# Use external RESULT_DIR if provided, otherwise generate default
+if [ -z "$RESULT_DIR" ]; then
+    RESULT_DIR="results_v3/client/sglang_${MODEL_NAME}_il${IL}/${DEPLOYMENT_TAG}_${DATE}"
+fi
 mkdir -p "$RESULT_DIR"
 
 export SGLANG_TORCH_PROFILER_DIR="$RESULT_DIR/torch_profile"
