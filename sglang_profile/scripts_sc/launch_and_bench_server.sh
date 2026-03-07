@@ -177,7 +177,7 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
     # wait $SERVER_PID 2>/dev/null || true
 
     echo "Force exit"
-    exit 0
+    exit 1
 
     echo "[INFO] Server stop complete"
 
@@ -185,7 +185,8 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
         echo "[SUCCESS] Benchmark completed successfully"
     else
         echo "[ERROR] Benchmark failed with exit code: $BENCH_EXIT_CODE"
-        exit $BENCH_EXIT_CODE
+        # exit $BENCH_EXIT_CODE
+        exit 1
     fi
 
     echo "=========================================="
@@ -194,6 +195,7 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
 
 else
     echo "[INFO] NODE_RANK is $NODE_RANK, skipping benchmark (only rank 0 runs benchmark)"
+    sleep infinity
     BENCH_EXIT_CODE=0
 fi
 
