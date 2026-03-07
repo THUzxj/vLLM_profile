@@ -9,7 +9,7 @@ export MODEL_NAME=${MODEL_PATH##*/}
 
 DEPLOYMENT_TAG=${DEPLOYMENT_TAG:-"default"}
 
-RESULT_DIR="results_v2/sglang_${MODEL_NAME}_il${IL}/${DEPLOYMENT_TAG}_${DATE}"
+RESULT_DIR="results_v3/client/sglang_${MODEL_NAME}_il${IL}/${DEPLOYMENT_TAG}_${DATE}"
 mkdir -p "$RESULT_DIR"
 
 export SGLANG_TORCH_PROFILER_DIR="$RESULT_DIR/torch_profile"

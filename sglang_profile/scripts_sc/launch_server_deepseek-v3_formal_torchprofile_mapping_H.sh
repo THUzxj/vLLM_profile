@@ -16,12 +16,21 @@ TP=${TP:-8}
 source "$(dirname "$0")/common_serve_args.sh"
 
 # Setup output directories
-RESULT_DIR="results/sglang_${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_${DATE}"
+RESULT_DIR="results_v3/server/sglang_${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_${DATE}"
 mkdir -p "$RESULT_DIR"
 
 RESULT_FILENAME="$RESULT_DIR/result.log"
 
 # Build the command with multi-node parameters if needed
+echo """
+python launch_server_058.py \
+    --model-path $MODEL_PATH \
+    --dp $DP --ep $EP --tp $TP --enable-dp-attention \
+    $MEM_ARGS \
+    "${LONG_CONTEXT_ARGS[@]}" \
+    $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
+    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS --disable-cuda-graph
+""" > $RESULT_DIR/command.log
 
 set -x
 python launch_server_058.py \
@@ -30,7 +39,7 @@ python launch_server_058.py \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
-    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS 2>&1 | tee $RESULT_DIR/run.log 
+    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS --disable-cuda-graph 2>&1 | tee $RESULT_DIR/run.log 
 set +x
 
 BENCH_EXIT_CODE=$?

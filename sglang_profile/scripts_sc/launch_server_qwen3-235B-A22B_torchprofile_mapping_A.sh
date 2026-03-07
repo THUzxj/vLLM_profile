@@ -44,7 +44,7 @@ for i in "${!NODES[@]}"; do
     EP="${EPS[$i]}"
     TP="${TPS[$i]}"
     
-    RESULT_DIR="results_v2/sglang_${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_${DATE}"
+    RESULT_DIR="results_v3/server/sglang_${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_${DATE}"
     mkdir -p "$RESULT_DIR"
 
     echo "=========================================="
@@ -62,6 +62,18 @@ for i in "${!NODES[@]}"; do
     else
         CURRENT_EPLB_ARGS=$EPLB_ARGS
     fi
+
+    echo """
+    python launch_server_058.py \
+        --model-path $MODEL_PATH \
+        --dp $DP --ep $EP --tp $TP --enable-dp-attention \
+        $MEM_ARGS \
+        "${LONG_CONTEXT_ARGS[@]}" \
+        $CURRENT_EPLB_ARGS \
+        $LOG_ARGS $METRICS_ARGS --disable-cuda-graph 2>&1 | tee "$RESULT_DIR/run.log"
+    """ > $RESULT_DIR/command.log
+
+
     set -x
     python launch_server_058.py \
         --model-path $MODEL_PATH \

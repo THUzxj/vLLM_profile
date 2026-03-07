@@ -21,7 +21,7 @@ source "$(dirname "$0")/common_serve_args.sh"
 
 
 # Setup output directories
-RESULT_DIR="results/sglang_${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_${DATE}"
+RESULT_DIR="results_v3/server/sglang_${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_${DATE}"
 mkdir -p "$RESULT_DIR"
 
 RESULT_FILENAME="$RESULT_DIR/result.log"
@@ -43,6 +43,16 @@ MULTI_NODE_ARGS=""
 if [ "$NNODES" -gt 1 ]; then
     MULTI_NODE_ARGS="--nnodes $NNODES --node-rank $NODE_RANK --dist-init-addr $DIST_INIT_ADDR"
 fi
+
+echo """
+python launch_server_058.py \
+    --model-path $MODEL_PATH \
+    --dp $DP --ep $EP --tp $TP --enable-dp-attention \
+    $MEM_ARGS \
+    "${LONG_CONTEXT_ARGS[@]}" \
+    $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
+    $LOG_ARGS $METRICS_ARGS $MULTI_NODE_ARGS $TBO_ARGS --disable-cuda-graph 2>&1 | tee "$RESULT_DIR/run.log"
+""" > $RESULT_DIR/command.log
 
 set -x
 python launch_server_058.py \
