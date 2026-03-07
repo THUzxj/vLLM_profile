@@ -11,6 +11,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3,4,5,6,7"}
 DP=${DP:-8}
 EP=${EP:-8}
 TP=${TP:-8}
+MOE_DENSE_TP=${MOE_DENSE_TP:-1} # Only None or 1 is valid for now
 
 # Source common arguments
 source "$(dirname "$0")/common_serve_args.sh"
@@ -31,7 +32,7 @@ RESULT_FILENAME="$RESULT_DIR/result.log"
 echo """
 python launch_server_058.py \
     --model-path $MODEL_PATH \
-    --dp $DP --ep $EP --tp $TP --enable-dp-attention \
+    --dp $DP --ep $EP --tp $TP --moe-dense-tp-size $MOE_DENSE_TP --enable-dp-attention \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
@@ -41,7 +42,7 @@ python launch_server_058.py \
 set -x
 python launch_server_058.py \
     --model-path $MODEL_PATH \
-    --dp $DP --ep $EP --tp $TP --enable-dp-attention \
+    --dp $DP --ep $EP --tp $TP --moe-dense-tp-size $MOE_DENSE_TP --enable-dp-attention \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \

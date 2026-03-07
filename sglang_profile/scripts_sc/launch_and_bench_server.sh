@@ -86,9 +86,11 @@ fi
 
 DATE=$(date +%Y%m%d_%H%M%S)
 
+MOE_DENSE_TP=${MOE_DENSE_TP:-1} # Only None or 1 is valid for now
+
 LAUNCH_SERVER_SCRIPT="$1"
 BENCH_SCRIPT="$2"
-RESULT_DIR="results_v4/${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_${DATE}"
+RESULT_DIR="results_v4/${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_moedensetp${MOE_DENSE_TP}_${DATE}"
 # RESULT_DIR="$3"
 SERVER_LOG=$RESULT_DIR/server.log
 BENCH_LOG=$RESULT_DIR/bench.log
