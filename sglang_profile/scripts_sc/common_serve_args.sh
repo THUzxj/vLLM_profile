@@ -84,3 +84,5 @@ else
     echo "[INFO] Single-node mode: NNODES=$NNODES, NODE_RANK=$NODE_RANK"
 fi
 
+export SGLANG_EXTERNAL_MODEL_PACKAGE="custom_models.torchprofile"
+
