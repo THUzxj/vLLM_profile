@@ -58,23 +58,32 @@ launch_and_wait_server() {
 
     # Launch server in background with RESULT_DIR and DATE exported
     # Enable job control to get the correct process group ID
-    export RESULT_DIR="$server_result_dir"
-    {
+
+
+    if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
+        export RESULT_DIR="$server_result_dir"
+        {
+            bash "$server_script" 2>&1 | tee "$server_log"
+        } &
+        SERVER_PID=$!
+        echo "[INFO] Server process started with PID: $SERVER_PID"
+
+        # Wait for server to be ready
+        if ! check_server_ready "$BASE_URL" $timeout $interval; then
+            echo "[ERROR] Failed to detect server ready state"
+            kill $SERVER_PID 2>/dev/null || true
+            wait $SERVER_PID 2>/dev/null || true
+            return 1
+        fi
+
+        return 0
+    else
+        # No background
+        export RESULT_DIR="$server_result_dir"
         bash "$server_script" 2>&1 | tee "$server_log"
-    } &
-    SERVER_PID=$!
-
-    echo "[INFO] Server process started with PID: $SERVER_PID"
-
-    # Wait for server to be ready
-    if ! check_server_ready "$BASE_URL" $timeout $interval; then
-        echo "[ERROR] Failed to detect server ready state"
-        kill $SERVER_PID 2>/dev/null || true
-        wait $SERVER_PID 2>/dev/null || true
-        return 1
+        SERVER_PID=$!
+        return $?
     fi
-
-    return 0
 }
 
 # Main script
@@ -195,7 +204,6 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
 
 else
     echo "[INFO] NODE_RANK is $NODE_RANK, skipping benchmark (only rank 0 runs benchmark)"
-    sleep infinity
     BENCH_EXIT_CODE=0
 fi
 
