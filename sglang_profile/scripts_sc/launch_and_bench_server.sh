@@ -132,55 +132,65 @@ export RESULT_DIR="$BENCH_RESULT_DIR"
 export SGLANG_TORCH_PROFILER_DIR="$BENCH_RESULT_DIR/torch_profile"
 mkdir -p "$SGLANG_TORCH_PROFILER_DIR"
 
-bash "$BENCH_SCRIPT" 2>&1 | tee "$BENCH_LOG"
-BENCH_EXIT_CODE=$?
+# Check if NODE_RANK is 0, only run benchmark on rank 0
+if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
+    echo "[INFO] NODE_RANK is $NODE_RANK, running benchmark..."
+    bash "$BENCH_SCRIPT" 2>&1 | tee "$BENCH_LOG"
+    BENCH_EXIT_CODE=$?
 
-# Kill server process
-echo "[INFO] Stopping server..."
-echo "[INFO] Server PID: $SERVER_PID"
 
-# Kill the process group (including child processes)
-if kill -0 -$SERVER_PID 2>/dev/null; then
-    echo "[INFO] Killing process group..."
-    kill -- -$SERVER_PID 2>/dev/null || true
-fi
+    # Kill server process
+    echo "[INFO] Stopping server..."
+    echo "[INFO] Server PID: $SERVER_PID"
 
-# Wait for up to 10 seconds for graceful shutdown
-SERVER_STOPPED=0
-for i in {1..10}; do
-    if ! ps -p $SERVER_PID > /dev/null 2>&1; then
-        echo "[INFO] Server stopped gracefully"
-        SERVER_STOPPED=1
-        break
-    fi
-    sleep 1
-done
-
-# If still running after 10 seconds, force kill the process group
-if [ $SERVER_STOPPED -eq 0 ]; then
-    echo "[WARNING] Server did not stop gracefully, forcing kill process group..."
+    # Kill the process group (including child processes)
     if kill -0 -$SERVER_PID 2>/dev/null; then
-        kill -9 -- -$SERVER_PID 2>/dev/null || true
+        echo "[INFO] Killing process group..."
+        kill -- -$SERVER_PID 2>/dev/null || true
     fi
-    # Also kill by name as fallback
-    pkill -9 -f "python.*sglang" 2>/dev/null || true
-fi
 
-# Wait for the process to finish (non-blocking if already exited)
-# wait $SERVER_PID 2>/dev/null || true
+    # Wait for up to 10 seconds for graceful shutdown
+    SERVER_STOPPED=0
+    for i in {1..10}; do
+        if ! ps -p $SERVER_PID > /dev/null 2>&1; then
+            echo "[INFO] Server stopped gracefully"
+            SERVER_STOPPED=1
+            break
+        fi
+        sleep 1
+    done
 
-echo "Force exit"
-exit 0
+    # If still running after 10 seconds, force kill the process group
+    if [ $SERVER_STOPPED -eq 0 ]; then
+        echo "[WARNING] Server did not stop gracefully, forcing kill process group..."
+        if kill -0 -$SERVER_PID 2>/dev/null; then
+            kill -9 -- -$SERVER_PID 2>/dev/null || true
+        fi
+        # Also kill by name as fallback
+        pkill -9 -f "python.*sglang" 2>/dev/null || true
+    fi
 
-echo "[INFO] Server stop complete"
+    # Wait for the process to finish (non-blocking if already exited)
+    # wait $SERVER_PID 2>/dev/null || true
 
-if [ $BENCH_EXIT_CODE -eq 0 ]; then
-    echo "[SUCCESS] Benchmark completed successfully"
+    echo "Force exit"
+    exit 0
+
+    echo "[INFO] Server stop complete"
+
+    if [ $BENCH_EXIT_CODE -eq 0 ]; then
+        echo "[SUCCESS] Benchmark completed successfully"
+    else
+        echo "[ERROR] Benchmark failed with exit code: $BENCH_EXIT_CODE"
+        exit $BENCH_EXIT_CODE
+    fi
+
+    echo "=========================================="
+    echo "Workflow completed!"
+    echo "=========================================="
+
 else
-    echo "[ERROR] Benchmark failed with exit code: $BENCH_EXIT_CODE"
-    exit $BENCH_EXIT_CODE
+    echo "[INFO] NODE_RANK is $NODE_RANK, skipping benchmark (only rank 0 runs benchmark)"
+    BENCH_EXIT_CODE=0
 fi
 
-echo "=========================================="
-echo "Workflow completed!"
-echo "=========================================="
