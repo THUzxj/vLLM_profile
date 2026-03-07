@@ -30,7 +30,7 @@ python launch_server_058.py \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
     $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS --disable-cuda-graph
-""" > $RESULT_DIR/command.log
+""" > $RESULT_DIR/command_node$NODE_RANK.log
 
 set -x
 python launch_server_058.py \
@@ -39,7 +39,7 @@ python launch_server_058.py \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
-    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS --disable-cuda-graph 2>&1 | tee $RESULT_DIR/run.log 
+    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS --disable-cuda-graph 2>&1 | tee $RESULT_DIR/run_node$NODE_RANK.log 
 set +x
 
 BENCH_EXIT_CODE=$?
