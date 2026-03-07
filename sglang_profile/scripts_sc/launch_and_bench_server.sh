@@ -120,7 +120,7 @@ mkdir -p "$RESULT_DIR"
 # Determine server and bench result directories
 SERVER_RESULT_DIR="$RESULT_DIR/server"
 BENCH_RESULT_DIR="$RESULT_DIR/client"
-mkdir -p "$SERVER_RESULT_DIR" "$BENCH_RESULT_DIR"
+mkdir -p "$SERVER_RESULT_DIR"
 
 # Launch server and wait for it to be ready
 if ! launch_and_wait_server "$LAUNCH_SERVER_SCRIPT" "$SERVER_LOG" "$SERVER_RESULT_DIR" $SERVER_READY_TIMEOUT $SERVER_READY_CHECK_INTERVAL; then
@@ -129,13 +129,12 @@ if ! launch_and_wait_server "$LAUNCH_SERVER_SCRIPT" "$SERVER_LOG" "$SERVER_RESUL
 fi
 
 # Server is ready, run benchmark with RESULT_DIR set
-echo "[INFO] Running benchmark..."
-export RESULT_DIR="$BENCH_RESULT_DIR"
-export SGLANG_TORCH_PROFILER_DIR="$BENCH_RESULT_DIR/torch_profile"
-mkdir -p "$SGLANG_TORCH_PROFILER_DIR"
-
 # Check if NODE_RANK is 0, only run benchmark on rank 0
 if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
+    mkdir -p "$BENCH_RESULT_DIR"
+    export RESULT_DIR="$BENCH_RESULT_DIR"
+    export SGLANG_TORCH_PROFILER_DIR="$BENCH_RESULT_DIR/torch_profile"
+    mkdir -p "$SGLANG_TORCH_PROFILER_DIR"
     echo "[INFO] NODE_RANK is $NODE_RANK, running benchmark..."
     bash "$BENCH_SCRIPT" 2>&1 | tee "$BENCH_LOG"
     BENCH_EXIT_CODE=$?
