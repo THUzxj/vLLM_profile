@@ -28,4 +28,5 @@ python bench_one_batch_server_058.py \
  --batch-size $BS --input-len $IL --output-len $OL \
  --profile --profile-by-stage \
  --result-filename $RESULT_DIR/result.jsonl \
- --dataset-path "ShareGPT_V3_sample_1pct.json"
+ --dataset-path "ShareGPT_V3_sample_1pct.json" \
+ --dp-size $DP --tp-size $TP --ep-size $EP --enable-dp-attention
