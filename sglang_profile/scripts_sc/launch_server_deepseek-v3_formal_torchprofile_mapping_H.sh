@@ -12,6 +12,7 @@ DP=${DP:-8}
 EP=${EP:-8}
 TP=${TP:-8}
 MOE_DENSE_TP=${MOE_DENSE_TP:-1} # Only None or 1 is valid for now
+MODULE_NAME=${MODULE_NAME:-"launch_server_058.py"}
 
 # Source common arguments
 source "$(dirname "$0")/common_serve_args.sh"
@@ -30,7 +31,7 @@ RESULT_FILENAME="$RESULT_DIR/result.log"
 
 # Build the command with multi-node parameters if needed
 echo """
-python launch_server_058.py \
+python $MODULE_NAME \
     --model-path $MODEL_PATH \
     --dp $DP --ep $EP --tp $TP --moe-dense-tp-size $MOE_DENSE_TP --enable-dp-attention \
     $MEM_ARGS \
@@ -40,7 +41,7 @@ python launch_server_058.py \
 """ > $RESULT_DIR/command_node$NODE_RANK.log
 
 set -x
-python launch_server_058.py \
+python $MODULE_NAME \
     --model-path $MODEL_PATH \
     --dp $DP --ep $EP --tp $TP --moe-dense-tp-size $MOE_DENSE_TP --enable-dp-attention \
     $MEM_ARGS \

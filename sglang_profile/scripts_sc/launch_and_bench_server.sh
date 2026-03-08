@@ -2,7 +2,7 @@
 set -e
 
 # Configuration
-SERVER_READY_TIMEOUT=120  # Maximum wait time in seconds
+SERVER_READY_TIMEOUT=1200  # Maximum wait time in seconds
 SERVER_READY_CHECK_INTERVAL=2  # Check interval in seconds
 BASE_URL="http://127.0.0.1:30000"
 MODEL_PATH=${MODEL_PATH:-"/nfs/xjzhang/Qwen/Qwen3-235B-A22B-1layer-new2"}

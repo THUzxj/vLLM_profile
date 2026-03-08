@@ -11,6 +11,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
 DP=${DP:-4}
 EP=${EP:-4}
 TP=${TP:-4}
+MODULE_NAME=${MODULE_NAME:-"launch_server_058.py"}
 
 # Source common arguments
 source "$(dirname "$0")/common_serve_args.sh"
@@ -29,7 +30,7 @@ RESULT_FILENAME="$RESULT_DIR/result.log"
 
 # Build the command with multi-node parameters if needed
 echo """
-python launch_server_058.py \
+python $MODULE_NAME \
     --model-path $MODEL_PATH \
     --dp $DP --ep $EP --tp $TP --enable-dp-attention \
     $MEM_ARGS \
@@ -39,7 +40,7 @@ python launch_server_058.py \
 """ > $RESULT_DIR/command.log
 
 set -x
-python launch_server_058.py \
+python $MODULE_NAME \
     --model-path $MODEL_PATH \
     --dp $DP --ep $EP --tp $TP --enable-dp-attention \
     $MEM_ARGS \

@@ -85,4 +85,4 @@ else
 fi
 
 export SGLANG_EXTERNAL_MODEL_PACKAGE="custom_models.torchprofile"
-
+export SGLANG_DG_CACHE_DIR="$PWD/dg_cache"
