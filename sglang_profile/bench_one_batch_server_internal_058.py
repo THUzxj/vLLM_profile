@@ -735,7 +735,7 @@ def run_benchmark_internal(
                     if should_skip_due_to_max_running_requests(
                         bs, skip_max_running_requests_threshold
                     ) or should_skip_due_to_token_capacity(
-                        bs, il, ol, skip_token_capacity_threshold
+                        bs, il, ol, skip_token_capacity_threshold, server_args.enable_dp_attention, server_args.dp_size
                     ):
                         continue
                     profile_prefix = (
