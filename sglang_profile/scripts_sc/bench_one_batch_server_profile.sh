@@ -22,12 +22,10 @@ mkdir -p "$RESULT_DIR"
 export SGLANG_TORCH_PROFILER_DIR="$RESULT_DIR/torch_profile"
 mkdir -p "$SGLANG_TORCH_PROFILER_DIR"
 
-python -m sglang.bench_one_batch_server \
+python bench_one_batch_server_058.py \
  --base-url http://127.0.0.1:30000 \
  --model-path $MODEL_PATH \
  --batch-size $BS --input-len $IL --output-len $OL \
  --profile --profile-by-stage \
  --result-filename $RESULT_DIR/result.jsonl \
  --dataset-path "ShareGPT_V3_sample_1pct.json"
-
- 
