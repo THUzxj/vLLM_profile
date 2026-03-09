@@ -26,12 +26,6 @@ check_server_ready() {
             return 0
         fi
 
-        # Alternative: check if port is listening
-        if nc -z 127.0.0.1 30000 2>/dev/null; then
-            echo "[INFO] Server port is listening!"
-            return 0
-        fi
-
         sleep $interval
         elapsed=$(( $(date +%s) - start_time ))
 
@@ -81,7 +75,6 @@ launch_and_wait_server() {
         # No background
         export RESULT_DIR="$server_result_dir"
         bash "$server_script" 2>&1 | tee "$server_log"
-        SERVER_PID=$!
         return $?
     fi
 }

@@ -2,6 +2,7 @@
 ARCHITECTURE="A"
 ENABLE_EPLB=1
 ENABLE_EXPERT_DISTRIBUTION_METRICS=0
+PROFILE_RANGES=${PROFILE_RANGES:-"0"}
 
 export DATE=`date +%Y%m%d_%H%M%S`
 export MODEL_PATH=${MODEL_PATH:-"/nfs/xjzhang/deepseek-ai/deepseek-v3-1layer-new-remapped"}
@@ -36,7 +37,7 @@ python $MODULE_NAME \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
-    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS --disable-cuda-graph
+    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS
 """ > $RESULT_DIR/command.log
 
 set -x
@@ -46,7 +47,7 @@ python $MODULE_NAME \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
-    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS --disable-cuda-graph 2>&1 | tee $RESULT_DIR/run.log
+    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS 2>&1 | tee $RESULT_DIR/run.log
 set +x
 
 
@@ -56,4 +57,4 @@ if [ $BENCH_EXIT_CODE -ne 0 ]; then
     exit $BENCH_EXIT_CODE
 fi
 
-echo "[INFO] Node $NODE_ID: All tasks completed"
+echo "[INFO] Node $NODE_RANK: All tasks completed"

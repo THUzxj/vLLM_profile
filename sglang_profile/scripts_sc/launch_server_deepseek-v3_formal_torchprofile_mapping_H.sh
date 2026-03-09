@@ -2,6 +2,7 @@
 ARCHITECTURE="H"
 ENABLE_EPLB=1
 ENABLE_EXPERT_DISTRIBUTION_METRICS=0
+PROFILE_RANGES=${PROFILE_RANGES:-"0"}
 
 export DATE=`date +%Y%m%d_%H%M%S`
 export MODEL_PATH=${MODEL_PATH:-"deepseek-ai/DeepSeek-V3"}
@@ -29,15 +30,22 @@ mkdir -p "$RESULT_DIR"
 
 RESULT_FILENAME="$RESULT_DIR/result.log"
 
+RUN_ARGS="
+--load-format dummy \
+--watchdog-timeout 3600 \
+--dist-timeout 3600 \
+"
+
 # Build the command with multi-node parameters if needed
 echo """
 python $MODULE_NAME \
     --model-path $MODEL_PATH \
     --dp $DP --ep $EP --tp $TP --moe-dense-tp-size $MOE_DENSE_TP --enable-dp-attention \
+    $RUN_ARGS \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
-    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS --disable-cuda-graph
+    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS
 """ > $RESULT_DIR/command_node$NODE_RANK.log
 
 set -x
@@ -47,7 +55,7 @@ python $MODULE_NAME \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
-    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS --disable-cuda-graph 2>&1 | tee $RESULT_DIR/run_node$NODE_RANK.log 
+    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS 2>&1 | tee $RESULT_DIR/run_node$NODE_RANK.log 
 set +x
 
 BENCH_EXIT_CODE=$?
@@ -56,4 +64,4 @@ if [ $BENCH_EXIT_CODE -ne 0 ]; then
     exit $BENCH_EXIT_CODE
 fi
 
-echo "[INFO] Node $NODE_ID: All tasks completed"
+echo "[INFO] Node $NODE_RANK: All tasks completed"

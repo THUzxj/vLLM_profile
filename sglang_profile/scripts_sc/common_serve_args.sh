@@ -19,9 +19,9 @@ fi
 
 LOG_ARGS="--log-level debug --show-time-cost"
 
-MEM_ARGS="""
+MEM_ARGS="
 --chunked-prefill-size 4096 \
---mem-fraction-static 0.8"""
+--mem-fraction-static 0.8"
 
 LONG_CONTEXT_ARGS=(
     "--context-length" "131072"
@@ -38,7 +38,11 @@ if [ "$ENABLE_EPLB" = 1 ]; then
     """
 
     if [ "$ARCHITECTURE" = "H" ]; then
-        EPLB_ARGS+="--moe-a2a-backend deepep --deepep-mode normal"
+        if [ "$PROFILE_RANGES" = "0" ]; then
+            EPLB_ARGS+="--moe-a2a-backend deepep --deepep-mode low_latency"
+        else
+            EPLB_ARGS+="--moe-a2a-backend deepep --deepep-mode normal"
+        fi
     fi
 else
     EPLB_ARGS=""
@@ -62,12 +66,14 @@ fi
 
 METRICS_ARGS="--enable-metrics"
 
-TORCH_PROFILE_ARGS="--profile --custom-models-mode torchprofile"
+if [ "$PROFILE_RANGES" = "1" ]; then
+    CUDA_GRAPH_ARGS="--disable-cuda-graph"
+else
+    CUDA_GRAPH_ARGS=""
+fi
 
 # export values
 # export LOGGING_CHUNCKED_PREFILL=True
-export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
-
 
 # distribution settings
 NODE_RANK=${RANK:-0}
@@ -84,5 +90,6 @@ else
     echo "[INFO] Single-node mode: NNODES=$NNODES, NODE_RANK=$NODE_RANK"
 fi
 
+export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
 export SGLANG_EXTERNAL_MODEL_PACKAGE="custom_models.torchprofile"
 export SGLANG_DG_CACHE_DIR="$PWD/dg_cache"

@@ -2,6 +2,7 @@
 ARCHITECTURE="H"
 ENABLE_EPLB=1
 ENABLE_EXPERT_DISTRIBUTION_METRICS=1
+PROFILE_RANGES=${PROFILE_RANGES:-"0"}
 
 # For Ampere GPUs, disable DeepEP
 
@@ -15,6 +16,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3,4,5,6,7"}
 DP=${DP:-8}
 EP=${EP:-8}
 TP=${TP:-8}
+MODULE_NAME=${MODULE_NAME:-"launch_server_058.py"}
 
 # Source common arguments
 source "$(dirname "$0")/common_serve_args.sh"
@@ -43,30 +45,24 @@ echo "=========================================="
 # Run the benchmark (all nodes execute this)
 echo "[INFO] Starting benchmark on node $NODE_RANK..."
 
-# Build base command arguments
-MULTI_NODE_ARGS=""
-if [ "$NNODES" -gt 1 ]; then
-    MULTI_NODE_ARGS="--nnodes $NNODES --node-rank $NODE_RANK --dist-init-addr $DIST_INIT_ADDR"
-fi
-
 echo """
-python launch_server_058.py \
+python $MODULE_NAME \
     --model-path $MODEL_PATH \
     --dp $DP --ep $EP --tp $TP --enable-dp-attention \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
-    $LOG_ARGS $METRICS_ARGS $MULTI_NODE_ARGS $TBO_ARGS --disable-cuda-graph 2>&1 | tee "$RESULT_DIR/run_node$NODE_RANK.log"
+    $LOG_ARGS $METRICS_ARGS $MULTI_NODE_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS 2>&1 | tee "$RESULT_DIR/run_node$NODE_RANK.log"
 """ > $RESULT_DIR/command_node$NODE_RANK.log
 
 set -x
-python launch_server_058.py \
+python $MODULE_NAME \
     --model-path $MODEL_PATH \
     --dp $DP --ep $EP --tp $TP --enable-dp-attention \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
-    $LOG_ARGS $METRICS_ARGS $MULTI_NODE_ARGS $TBO_ARGS --disable-cuda-graph 2>&1 | tee "$RESULT_DIR/run_node$NODE_RANK.log"
+    $LOG_ARGS $METRICS_ARGS $MULTI_NODE_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS 2>&1 | tee "$RESULT_DIR/run_node$NODE_RANK.log"
 set +x
 
 BENCH_EXIT_CODE=$?

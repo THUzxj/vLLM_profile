@@ -2,6 +2,7 @@
 BS=${BS:-"32"}
 IL=${IL:-"32000"}
 OL=${OL:-"101"}
+PROFILE_STEPS=${PROFILE_STEPS:-10}
 
 export DATE=`date +%Y%m%d_%H%M%S`
 MODEL_PATH=${MODEL_PATH:-"/nfs/xjzhang/Qwen/Qwen3-235B-A22B-1layer-new2"}
@@ -26,7 +27,7 @@ python bench_one_batch_server_058.py \
  --base-url http://127.0.0.1:30000 \
  --model-path $MODEL_PATH \
  --batch-size $BS --input-len $IL --output-len $OL \
- --profile --profile-by-stage \
+ --profile --profile-by-stage --profile-steps $PROFILE_STEPS \
  --result-filename $RESULT_DIR/result.jsonl \
  --dataset-path "ShareGPT_V3_sample_1pct.json" \
  --dp-size $DP --tp-size $TP --ep-size $EP --enable-dp-attention

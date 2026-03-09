@@ -2,6 +2,7 @@
 ARCHITECTURE="A"
 ENABLE_EPLB=1
 ENABLE_EXPERT_DISTRIBUTION_METRICS=0
+PROFILE_RANGES=${PROFILE_RANGES:-"0"}
 
 # For Ampere GPUs, disable DeepEP
 
@@ -31,6 +32,7 @@ declare -a CUDA_DEVICES=("0,1,2,3")
 declare -a DPS=(4)
 declare -a EPS=(4)
 declare -a TPS=(4)
+MODULE_NAME=${MODULE_NAME:-"launch_server_058.py"}
 
 # declare -a NODES=(1)
 # declare -a CUDA_DEVICES=("0")
@@ -71,23 +73,23 @@ for i in "${!NODES[@]}"; do
     fi
 
     echo """
-    python launch_server_058.py \
+    python $MODULE_NAME \
         --model-path $MODEL_PATH \
         --dp $DP --ep $EP --tp $TP --enable-dp-attention \
         $MEM_ARGS \
         "${LONG_CONTEXT_ARGS[@]}" \
         $CURRENT_EPLB_ARGS \
-        $LOG_ARGS $METRICS_ARGS --disable-cuda-graph 2>&1 | tee "$RESULT_DIR/run.log"
+        $LOG_ARGS $METRICS_ARGS $CUDA_GRAPH_ARGS 2>&1 | tee "$RESULT_DIR/run.log"
     """ > $RESULT_DIR/command.log
 
 
     set -x
-    python launch_server_058.py \
+    python $MODULE_NAME \
         --model-path $MODEL_PATH \
         --dp $DP --ep $EP --tp $TP --enable-dp-attention \
         $MEM_ARGS \
         "${LONG_CONTEXT_ARGS[@]}" \
         $CURRENT_EPLB_ARGS \
-        $LOG_ARGS $METRICS_ARGS --disable-cuda-graph 2>&1 | tee "$RESULT_DIR/run.log"
+        $LOG_ARGS $METRICS_ARGS $CUDA_GRAPH_ARGS 2>&1 | tee "$RESULT_DIR/run.log"
     set +x
 done
