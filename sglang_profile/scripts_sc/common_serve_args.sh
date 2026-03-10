@@ -91,5 +91,12 @@ else
 fi
 
 export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
-export SGLANG_EXTERNAL_MODEL_PACKAGE="custom_models.torchprofile"
+
+
+if [ "$USE_CUSTOM_MODEL" = 1 ]; then
+    export SGLANG_EXTERNAL_MODEL_PACKAGE="custom_models.torchprofile"
+else
+    export SGLANG_EXTERNAL_MODEL_PACKAGE=""
+fi
+
 export SGLANG_DG_CACHE_DIR="$PWD/dg_cache"
