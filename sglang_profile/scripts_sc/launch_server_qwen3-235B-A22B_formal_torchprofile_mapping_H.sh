@@ -16,7 +16,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3,4,5,6,7"}
 DP=${DP:-8}
 EP=${EP:-8}
 TP=${TP:-8}
-MODULE_NAME=${MODULE_NAME:-"launch_server_058.py"}
+MODULE_NAME=${MODULE_NAME:-"-m sglang.launch_server"}
 
 # Source common arguments
 source "$(dirname "$0")/common_serve_args.sh"

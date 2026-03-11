@@ -19,9 +19,12 @@ fi
 
 LOG_ARGS="--log-level debug --show-time-cost"
 
+
+MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-0.8}
+MEM_CHUNKED_PREFILL_SIZE=${MEM_CHUNKED_PREFILL_SIZE:-4096}
 MEM_ARGS="
---chunked-prefill-size 4096 \
---mem-fraction-static 0.8"
+--chunked-prefill-size $MEM_CHUNKED_PREFILL_SIZE \
+--mem-fraction-static $MEM_FRACTION_STATIC"
 
 LONG_CONTEXT_ARGS=(
     "--context-length" "131072"
@@ -69,7 +72,8 @@ METRICS_ARGS="--enable-metrics"
 if [ "$PROFILE_RANGES" = "1" ]; then
     CUDA_GRAPH_ARGS="--disable-cuda-graph"
 else
-    CUDA_GRAPH_ARGS=""
+    CUDA_GRAPH_MAX_BS=${CUDA_GRAPH_MAX_BS:-256}
+    CUDA_GRAPH_ARGS="--cuda-graph-max-bs $CUDA_GRAPH_MAX_BS"
 fi
 
 # export values
@@ -99,4 +103,4 @@ else
     export SGLANG_EXTERNAL_MODEL_PACKAGE=""
 fi
 
-export SGLANG_DG_CACHE_DIR="$PWD/dg_cache"
+export SGLANG_DG_CACHE_DIR="$PWD/dg_cache_nnode${WORLD_SIZE}_rank${RANK}"

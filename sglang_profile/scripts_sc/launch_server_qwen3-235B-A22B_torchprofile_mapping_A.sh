@@ -32,7 +32,7 @@ declare -a CUDA_DEVICES=("0,1,2,3")
 declare -a DPS=(4)
 declare -a EPS=(4)
 declare -a TPS=(4)
-MODULE_NAME=${MODULE_NAME:-"launch_server_058.py"}
+MODULE_NAME=${MODULE_NAME:-"-m sglang.launch_server"}
 
 # declare -a NODES=(1)
 # declare -a CUDA_DEVICES=("0")
