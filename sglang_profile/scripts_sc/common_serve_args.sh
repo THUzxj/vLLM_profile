@@ -20,8 +20,24 @@ fi
 LOG_ARGS="--log-level debug --show-time-cost"
 
 
+ENABLE_DP_ATTENTION=${ENABLE_DP_ATTENTION:-1}
+
+if [ "$ENABLE_DP_ATTENTION" = 1 ]; then
+    DP_ATTENTION_ARGS="--enable-dp-attention"
+else
+    DP_ATTENTION_ARGS=""
+fi
+
+
 MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-0.8}
+
+
 MEM_CHUNKED_PREFILL_SIZE=${MEM_CHUNKED_PREFILL_SIZE:-4096}
+if [ "$ENABLE_DP_ATTENTION" = 1 ]; then
+    MEM_CHUNKED_PREFILL_SIZE=$((MEM_CHUNKED_PREFILL_SIZE * DP))
+    echo "[INFO] DP attention is enabled. The chunked prefill size is adjusted to $MEM_CHUNKED_PREFILL_SIZE"
+fi
+
 MEM_ARGS="
 --chunked-prefill-size $MEM_CHUNKED_PREFILL_SIZE \
 --mem-fraction-static $MEM_FRACTION_STATIC"

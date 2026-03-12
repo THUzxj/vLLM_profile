@@ -41,7 +41,7 @@ RUN_ARGS="
 echo """
 python $MODULE_NAME \
     --model-path $MODEL_PATH \
-    --dp $DP --ep $EP --tp $TP --moe-dense-tp-size $MOE_DENSE_TP --enable-dp-attention \
+    --dp $DP --ep $EP --tp $TP --moe-dense-tp-size $MOE_DENSE_TP $DP_ATTENTION_ARGS \
     $RUN_ARGS \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
@@ -52,7 +52,7 @@ python $MODULE_NAME \
 set -x
 python $MODULE_NAME \
     --model-path $MODEL_PATH \
-    --dp $DP --ep $EP --tp $TP --moe-dense-tp-size $MOE_DENSE_TP --enable-dp-attention \
+    --dp $DP --ep $EP --tp $TP --moe-dense-tp-size $MOE_DENSE_TP $DP_ATTENTION_ARGS \
     $RUN_ARGS \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
