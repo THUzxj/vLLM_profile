@@ -5,6 +5,10 @@ ENABLE_EXPERT_DISTRIBUTION_METRICS=0
 PROFILE_RANGES=${PROFILE_RANGES:-"0"}
 USE_CUSTOM_MODEL=${USE_CUSTOM_MODEL:-0}
 
+# Enable Nsight Systems profiling with capture-range when set to 1
+# Usage: ENABLE_NSYS_PROFILE=1 ./launch_server_deepseek-v3_formal_torchprofile_mapping_H.sh
+ENABLE_NSYS_PROFILE=${ENABLE_NSYS_PROFILE:-0}
+
 export DATE=`date +%Y%m%d_%H%M%S`
 export MODEL_PATH=${MODEL_PATH:-"deepseek-ai/DeepSeek-V3"}
 export MODEL_NAME=${MODEL_PATH##*/}
@@ -31,6 +35,14 @@ mkdir -p "$RESULT_DIR"
 
 RESULT_FILENAME="$RESULT_DIR/result.log"
 
+# Optional Nsight Systems profiling (capture-range mode)
+PROFILE_PREFIX=""
+if [ "$ENABLE_NSYS_PROFILE" -eq 1 ]; then
+    # nsys output will be written under RESULT_DIR
+    NSYS_OUT_BASENAME="$RESULT_DIR/nsys_profile"
+    PROFILE_PREFIX="nsys profile --trace-fork-before-exec=true --cuda-graph-trace=node --capture-range=cudaProfilerApi --capture-range-end=stop -o \"$NSYS_OUT_BASENAME\" "
+fi
+
 RUN_ARGS="
 --load-format dummy \
 --watchdog-timeout 3600 \
@@ -39,7 +51,7 @@ RUN_ARGS="
 
 # Build the command with multi-node parameters if needed
 echo """
-python $MODULE_NAME \
+${PROFILE_PREFIX}python $MODULE_NAME \
     --model-path $MODEL_PATH \
     --dp $DP --ep $EP --tp $TP --moe-dense-tp-size $MOE_DENSE_TP $DP_ATTENTION_ARGS \
     $RUN_ARGS \
@@ -50,7 +62,7 @@ python $MODULE_NAME \
 """ > $RESULT_DIR/command_node$NODE_RANK.log
 
 set -x
-python $MODULE_NAME \
+eval ${PROFILE_PREFIX}python $MODULE_NAME \
     --model-path $MODEL_PATH \
     --dp $DP --ep $EP --tp $TP --moe-dense-tp-size $MOE_DENSE_TP $DP_ATTENTION_ARGS \
     $RUN_ARGS \

@@ -9,6 +9,17 @@ MODEL_PATH=${MODEL_PATH:-"/nfs/xjzhang/Qwen/Qwen3-235B-A22B-1layer-new2"}
 NODE_RANK=${RANK:-0}
 NNODES=${WORLD_SIZE:-1}
 
+# Only allow Nsight Systems profiling on rank 0
+# If ENABLE_NSYS_PROFILE is set for multi-node runs, non-zero ranks will have it disabled.
+if [ -n "${ENABLE_NSYS_PROFILE:-}" ] && [ "${ENABLE_NSYS_PROFILE}" != "0" ]; then
+    if [ -n "${NODE_RANK:-}" ] && [ "${NODE_RANK}" != "0" ]; then
+        echo "[INFO] NODE_RANK=${NODE_RANK}: disabling Nsight Systems profiling (only rank 0 is profiled)"
+        ENABLE_NSYS_PROFILE=0
+    else
+        echo "[INFO] NODE_RANK=${NODE_RANK}: Nsight Systems profiling enabled"
+    fi
+fi
+
 # Function to check if server is ready by polling the health endpoint
 check_server_ready() {
     local base_url="$1"
