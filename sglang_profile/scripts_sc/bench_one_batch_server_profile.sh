@@ -40,4 +40,4 @@ python bench_one_batch_server_058.py \
  --profile --profile-by-stage --profile-steps $PROFILE_STEPS \
  --result-filename $RESULT_DIR/result.jsonl \
  --dataset-path "ShareGPT_V3_sample_1pct.json" \
- --dp-size $DP --tp-size $TP --ep-size $EP --enable-dp-attention
+ --dp-size $DP --tp-size $TP --ep-size $EP --enable-dp-attention 2>&1 | tee $RESULT_DIR/client.log
