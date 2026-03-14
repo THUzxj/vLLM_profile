@@ -416,6 +416,7 @@ def run_one_case(
         input_ids = [req.prompt for req in input_requests]
 
     payload["input_ids"] = input_ids
+    num_requests = len(input_ids)
 
     # Warm up cache if cache_hit_rate > 0.0
     if cache_hit_rate > 0.0:
@@ -443,6 +444,12 @@ def run_one_case(
     # Get metrics before the request (for cache hit rate calculation)
     metrics_before = get_cache_tokens_from_metrics(url)
 
+    # Log request count before send and compare with bs
+    print(
+        f"[before send] request_count={num_requests}, bs={batch_size}, "
+        f"match={num_requests == batch_size}"
+    )
+
     # Run the request
     tic = time.perf_counter()
     response = requests.post(
@@ -455,6 +462,7 @@ def run_one_case(
 
     # Get the TTFT of the last request in the batch
     last_ttft = 0.0
+    response_request_count: Optional[int] = None
     for chunk in response.iter_lines(decode_unicode=False):
         chunk = chunk.decode("utf-8")
         if chunk and chunk.startswith("data:"):
@@ -470,6 +478,20 @@ def run_one_case(
             )
             if data["meta_info"]["completion_tokens"] == 1:
                 last_ttft = time.perf_counter() - tic
+            # Infer response request count from chunk (e.g. batched stream may have "text" list)
+            if "text" in data and isinstance(data["text"], list):
+                response_request_count = len(data["text"])
+
+    # Log request count after response and compare with bs
+    match_after = (
+        (response_request_count == batch_size)
+        if response_request_count is not None
+        else None
+    )
+    print(
+        f"[after response] request_count={response_request_count if response_request_count is not None else 'N/A'}, "
+        f"bs={batch_size}, match={match_after if match_after is not None else 'N/A'}"
+    )
 
     # Compute metrics
     latency = time.perf_counter() - tic
