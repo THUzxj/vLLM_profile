@@ -376,6 +376,16 @@ def run_one_case(
             random_sample=True,
             return_text=False,
         )
+    elif dataset_name == "dummy":
+        input_requests = sample_random_requests(
+            input_len=input_len,
+            output_len=output_len,
+            num_prompts=batch_size,
+            range_ratio=1.0,
+            tokenizer=tokenizer,
+            random_sample=False,
+            return_text=False,
+        )
 
     # Load sampling parameters
     use_structured_outputs = False
