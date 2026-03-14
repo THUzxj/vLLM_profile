@@ -109,6 +109,7 @@ class BenchArgs:
     append_to_github_summary: bool = True
     seed: int = 42
     cache_hit_rate: float = 0.0
+    measure: bool = False
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -191,6 +192,12 @@ class BenchArgs:
             default=BenchArgs.cache_hit_rate,
             help="Cache hit rate for benchmarking (0.0-1.0). "
             "0.0 means no cache hits (flush all), 0.4 means 40%% of input tokens are cached.",
+        )
+        parser.add_argument(
+            "--measure",
+            action="store_true",
+            default=BenchArgs.measure,
+            help="If set, run the benchmark measurement loop (batch_size x input_len x output_len).",
         )
 
     @classmethod
@@ -697,34 +704,35 @@ def run_benchmark_internal(
     profile_results = []
     try:
         # Benchmark all cases
-        for bs, il, ol in itertools.product(
-            bench_args.batch_size, bench_args.input_len, bench_args.output_len
-        ):
-            if should_skip_due_to_max_running_requests(
-                bs, skip_max_running_requests_threshold
-            ) or should_skip_due_to_token_capacity(
-                bs, il, ol, skip_token_capacity_threshold, server_args.enable_dp_attention, server_args.dp_size
+        if bench_args.measure:
+            for bs, il, ol in itertools.product(
+                bench_args.batch_size, bench_args.input_len, bench_args.output_len
             ):
-                continue
-            results.append(
-                run_one_case(
-                    base_url,
-                    bs,
-                    il,
-                    ol,
-                    temperature=bench_args.temperature,
-                    return_logprob=bench_args.return_logprob,
-                    stream_interval=bench_args.client_stream_interval,
-                    input_len_step_percentage=bench_args.input_len_step_percentage,
-                    run_name=bench_args.run_name,
-                    result_filename=bench_args.result_filename,
-                    tokenizer=tokenizer,
-                    dataset_name=bench_args.dataset_name,
-                    dataset_path=bench_args.dataset_path,
-                    parallel_batch=bench_args.parallel_batch,
-                    cache_hit_rate=bench_args.cache_hit_rate,
+                if should_skip_due_to_max_running_requests(
+                    bs, skip_max_running_requests_threshold
+                ) or should_skip_due_to_token_capacity(
+                    bs, il, ol, skip_token_capacity_threshold, server_args.enable_dp_attention, server_args.dp_size
+                ):
+                    continue
+                results.append(
+                    run_one_case(
+                        base_url,
+                        bs,
+                        il,
+                        ol,
+                        temperature=bench_args.temperature,
+                        return_logprob=bench_args.return_logprob,
+                        stream_interval=bench_args.client_stream_interval,
+                        input_len_step_percentage=bench_args.input_len_step_percentage,
+                        run_name=bench_args.run_name,
+                        result_filename=bench_args.result_filename,
+                        tokenizer=tokenizer,
+                        dataset_name=bench_args.dataset_name,
+                        dataset_path=bench_args.dataset_path,
+                        parallel_batch=bench_args.parallel_batch,
+                        cache_hit_rate=bench_args.cache_hit_rate,
+                    )
                 )
-            )
 
         # Profile all cases
         if bench_args.profile:
