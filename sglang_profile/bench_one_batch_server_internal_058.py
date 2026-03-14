@@ -163,7 +163,7 @@ class BenchArgs:
             "--dataset-name",
             type=str,
             default=BenchArgs.dataset_name,
-            choices=["mmmu", "random"],
+            choices=["mmmu", "random", "dummy"],
             help="Name of the dataset to benchmark on.",
         )
         parser.add_argument("--parallel-batch", action="store_true")
