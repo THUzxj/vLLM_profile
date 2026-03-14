@@ -383,6 +383,7 @@ def run_one_case(
             num_prompts=batch_size,
             range_ratio=1.0,
             tokenizer=tokenizer,
+            dataset_path=dataset_path,
             random_sample=False,
             return_text=False,
         )
