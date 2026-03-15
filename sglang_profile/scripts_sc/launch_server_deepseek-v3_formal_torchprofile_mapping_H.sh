@@ -40,7 +40,7 @@ PROFILE_PREFIX=""
 if [ "$ENABLE_NSYS_PROFILE" -eq 1 ]; then
     # nsys output will be written under RESULT_DIR
     NSYS_OUT_BASENAME="$RESULT_DIR/nsys_profile"
-    PROFILE_PREFIX="nsys profile --trace-fork-before-exec=true --cuda-graph-trace=node --capture-range=cudaProfilerApi --capture-range-end=stop -o \"$NSYS_OUT_BASENAME\" "
+    PROFILE_PREFIX="nsys profile --trace-fork-before-exec=true --cuda-graph-trace=node --capture-range=cudaProfilerApi --capture-range-end=stop -o $NSYS_OUT_BASENAME "
 fi
 
 RUN_ARGS="
