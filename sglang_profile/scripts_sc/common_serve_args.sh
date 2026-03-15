@@ -70,6 +70,7 @@ fi
 if [ "$ENABLE_EXPERT_DISTRIBUTION_METRICS" = 1 ]; then
     EXPERT_DISTRIBUTION_METRICS_ARGS="--enable-expert-distribution-metrics"
     if [ "$ARCHITECTURE" = "H" ]; then
+        export SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=512
         EXPERT_DISTRIBUTION_METRICS_ARGS+=" --expert-distribution-recorder-mode stat_approx"
     fi
 else

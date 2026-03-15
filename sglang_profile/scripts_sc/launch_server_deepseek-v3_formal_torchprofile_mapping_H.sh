@@ -62,7 +62,7 @@ ${PROFILE_PREFIX}python $MODULE_NAME \
 """ > $RESULT_DIR/command_node$NODE_RANK.log
 
 set -x
-eval ${PROFILE_PREFIX}python $MODULE_NAME \
+${PROFILE_PREFIX}python $MODULE_NAME \
     --model-path $MODEL_PATH \
     --dp $DP --ep $EP --tp $TP --moe-dense-tp-size $MOE_DENSE_TP $DP_ATTENTION_ARGS \
     $RUN_ARGS \

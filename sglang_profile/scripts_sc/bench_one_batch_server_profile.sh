@@ -20,6 +20,12 @@ else
     SKIP_WARMUP_ARG=""
 fi
 
+if [ "$ENABLE_NSYS_PROFILE" = 1 ]; then
+    NSYS_PROFILE_ARGS="--use-nsys"
+else
+    NSYS_PROFILE_ARGS=""
+fi
+
 # Use external RESULT_DIR if provided, otherwise generate default
 if [ -z "$RESULT_DIR" ]; then
     RESULT_DIR="results_v3/client/sglang_${MODEL_NAME}_il${IL}/${DEPLOYMENT_TAG}_${DATE}"
@@ -36,7 +42,7 @@ echo "python bench_one_batch_server_058.py \
     --profile --profile-by-stage --profile-steps $PROFILE_STEPS \
     --result-filename $RESULT_DIR/result.jsonl \
     --dataset-path "ShareGPT_V3_sample_1pct.json" \
-    --dp-size $DP --tp-size $TP --ep-size $EP --enable-dp-attention $SKIP_WARMUP_ARG
+    --dp-size $DP --tp-size $TP --ep-size $EP --enable-dp-attention $SKIP_WARMUP_ARG $NSYS_PROFILE_ARGS
 " > $RESULT_DIR/command.log
 
 python bench_one_batch_server_058.py \
@@ -46,4 +52,4 @@ python bench_one_batch_server_058.py \
  --profile --profile-by-stage --profile-steps $PROFILE_STEPS \
  --result-filename $RESULT_DIR/result.jsonl \
  --dataset-path "ShareGPT_V3_sample_1pct.json" \
- --dp-size $DP --tp-size $TP --ep-size $EP --enable-dp-attention $SKIP_WARMUP_ARG 2>&1 | tee $RESULT_DIR/client.log
+ --dp-size $DP --tp-size $TP --ep-size $EP --enable-dp-attention $SKIP_WARMUP_ARG $NSYS_PROFILE_ARGS 2>&1 | tee $RESULT_DIR/client.log

@@ -110,6 +110,8 @@ class BenchArgs:
     seed: int = 42
     cache_hit_rate: float = 0.0
     measure: bool = False
+    profile_activities: Optional[List[str]] = None
+    use_nsys: bool = False
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -199,11 +201,31 @@ class BenchArgs:
             default=BenchArgs.measure,
             help="If set, run the benchmark measurement loop (batch_size x input_len x output_len).",
         )
+        parser.add_argument(
+            "--profile-activities",
+            type=str,
+            nargs="+",
+            default=BenchArgs.profile_activities,
+            help="Profile activities to enable. Choices: CPU, GPU, CUDA_PROFILER, MEM, RPD. "
+            "Default: ['CPU', 'GPU'] if not specified. If --use-nsys is set, this will be overridden to ['CUDA_PROFILER'] unless explicitly specified.",
+        )
+        parser.add_argument(
+            "--use-nsys",
+            action="store_true",
+            default=BenchArgs.use_nsys,
+            help="Use nsys profiling (CUDA_PROFILER). If set, profile_activities will be automatically set to ['CUDA_PROFILER'] unless --profile-activities is explicitly specified.",
+        )
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
         attrs = [attr.name for attr in dataclasses.fields(cls)]
-        return cls(**{attr: getattr(args, attr) for attr in attrs})
+        instance = cls(**{attr: getattr(args, attr) for attr in attrs})
+        
+        # If use_nsys is True and profile_activities is not explicitly set, use CUDA_PROFILER
+        if instance.use_nsys and instance.profile_activities is None:
+            instance.profile_activities = ["CUDA_PROFILER"]
+        
+        return instance
 
 
 class BenchOneCaseResult(BaseModel):
@@ -352,6 +374,7 @@ def run_one_case(
     dataset_path: str = BenchArgs.dataset_path,
     parallel_batch: bool = False,
     cache_hit_rate: float = BenchArgs.cache_hit_rate,
+    profile_activities: Optional[List[str]] = None,
 ):
     response = requests.post(url + "/flush_cache", timeout=DEFAULT_TIMEOUT)
     response.raise_for_status()
@@ -443,10 +466,12 @@ def run_one_case(
     # Turn on profiler
     profile_link = None
     if profile:
+        # Use provided activities or default to ["CPU", "GPU"]
+        activities = profile_activities if profile_activities is not None else ["CPU", "GPU"]
         profile_link: str = run_profile(
             url=url,
             num_steps=profile_steps,
-            activities=["CPU", "GPU"],
+            activities=activities,
             output_dir=profile_output_dir,
             profile_by_stage=profile_by_stage,
             profile_prefix=profile_prefix,
@@ -804,6 +829,7 @@ def run_benchmark_internal(
                             profile_by_stage=bench_args.profile_by_stage,
                             profile_prefix=profile_prefix,
                             profile_output_dir=bench_args.profile_output_dir,
+                            profile_activities=bench_args.profile_activities,
                         )
                     )
             except Exception as e:
