@@ -2,13 +2,15 @@
 set -e
 
 # Configuration
-SERVER_READY_TIMEOUT=1200  # Maximum wait time in seconds
+SERVER_READY_TIMEOUT=32000  # Maximum wait time in seconds
 SERVER_READY_CHECK_INTERVAL=2  # Check interval in seconds
 BASE_URL="http://127.0.0.1:30000"
 MODEL_PATH=${MODEL_PATH:-"/nfs/xjzhang/Qwen/Qwen3-235B-A22B-1layer-new2"}
 MODEL_NAME=${MODEL_PATH##*/}
 NODE_RANK=${RANK:-0}
 NNODES=${WORLD_SIZE:-1}
+ARCHITECTURE=${ARCHITECTURE:-"H"}
+ENABLE_TBO=${ENABLE_TBO:-0}
 
 # Only allow Nsight Systems profiling on rank 0
 # If ENABLE_NSYS_PROFILE is set for multi-node runs, non-zero ranks will have it disabled.
@@ -36,6 +38,8 @@ check_server_ready() {
         if curl -s -f "${base_url}/health" > /dev/null 2>&1; then
             echo "[INFO] Server health check passed!"
             return 0
+        else
+            echo "[ERROR] Server health check failed!"
         fi
 
         sleep $interval
@@ -202,6 +206,7 @@ fi
 # Server is ready, run benchmark with RESULT_DIR set
 # Check if NODE_RANK is 0, only run benchmark on rank 0
 if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
+    echo "=============== START BENCHMARK ==============="
     mkdir -p "$BENCH_RESULT_DIR"
     export RESULT_DIR="$BENCH_RESULT_DIR"
     export SGLANG_TORCH_PROFILER_DIR="$BENCH_RESULT_DIR/torch_profile"
@@ -210,6 +215,7 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
     bash "$BENCH_SCRIPT" 2>&1 | tee "$BENCH_LOG"
     BENCH_EXIT_CODE=$?
 
+    sleep 10
 
     # Kill server process
     echo "[INFO] Stopping server..."
