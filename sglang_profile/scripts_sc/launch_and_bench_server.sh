@@ -134,7 +134,7 @@ if [ -z "${RESULT_DIR:-}" ]; then
     if [ "$NNODES" -gt 1 ]; then
         if [ "$NODE_RANK" = "0" ]; then
             rm -f "$SYNC_FILE"
-            RESULT_DIR="results_v4/${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_moedensetp${MOE_DENSE_TP}_${DATE}"
+            RESULT_DIR="results_v4/${MODEL_NAME}/dp${DP}_TBO${ENABLE_TBO}_NORMAL${PROFILE_RANGES}_${DATE}"
             echo "$RESULT_DIR" > "${SYNC_FILE}.tmp"
             mv "${SYNC_FILE}.tmp" "$SYNC_FILE"
             SYNC_FILE_CREATED=1
@@ -157,7 +157,7 @@ if [ -z "${RESULT_DIR:-}" ]; then
             echo "[INFO] Node $NODE_RANK: synced RESULT_DIR=$RESULT_DIR"
         fi
     else
-        RESULT_DIR="results_v4/${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_moedensetp${MOE_DENSE_TP}_${DATE}"
+        RESULT_DIR="results_v4/${MODEL_NAME}/dp${DP}_TBO${ENABLE_TBO}_NORMAL${PROFILE_RANGES}_${DATE}"
     fi
 fi
 
