@@ -17,7 +17,7 @@ DEPLOYMENT_TAG=${DEPLOYMENT_TAG:-"default"}
 if [ "$SKIP_WARMUP" = "1" ]; then
     SKIP_WARMUP_ARG="--skip-warmup"
 else
-    SKIP_WARMUP_ARG=""
+    SKIP_WARMUP_ARG="--measure"
 fi
 
 if [ "$ENABLE_NSYS_PROFILE" = 1 ]; then
@@ -41,7 +41,7 @@ echo "python bench_one_batch_server_058.py \
     --batch-size $BS --input-len $IL --output-len $OL \
     --profile --profile-by-stage --profile-steps $PROFILE_STEPS \
     --result-filename $RESULT_DIR/result.jsonl \
-    --dataset-path "ShareGPT_V3_sample_1pct.json" \
+    --dataset-path "../sharegpt_data/ShareGPT_V3_unfiltered_cleaned_split.json" \
     --dp-size $DP --tp-size $TP --ep-size $EP --enable-dp-attention $SKIP_WARMUP_ARG $NSYS_PROFILE_ARGS
 " > $RESULT_DIR/command.log
 
@@ -51,5 +51,5 @@ python bench_one_batch_server_058.py \
  --batch-size $BS --input-len $IL --output-len $OL \
  --profile --profile-by-stage --profile-steps $PROFILE_STEPS \
  --result-filename $RESULT_DIR/result.jsonl \
- --dataset-path "ShareGPT_V3_sample_1pct.json" \
+ --dataset-path "../sharegpt_data/ShareGPT_V3_unfiltered_cleaned_split.json" \
  --dp-size $DP --tp-size $TP --ep-size $EP --enable-dp-attention $SKIP_WARMUP_ARG $NSYS_PROFILE_ARGS 2>&1 | tee $RESULT_DIR/client.log

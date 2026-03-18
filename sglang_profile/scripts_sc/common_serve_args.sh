@@ -17,7 +17,7 @@ else
     PROMPT_FILE_ARGS=""
 fi
 
-LOG_ARGS="--log-level debug --show-time-cost"
+LOG_ARGS="--decode-log-interval 1 --show-time-cost"
 
 
 ENABLE_DP_ATTENTION=${ENABLE_DP_ATTENTION:-1}
@@ -28,6 +28,8 @@ else
     DP_ATTENTION_ARGS=""
 fi
 
+ATTN_BACKEND=${ATTN_BACKEND:-"fa3"}
+DP_ATTENTION_ARGS+=" --attention-backend $ATTN_BACKEND"
 
 MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-0.8}
 
@@ -58,6 +60,7 @@ if [ "$ENABLE_EPLB" = 1 ]; then
 
     if [ "$ARCHITECTURE" = "H" ]; then
         if [ "$PROFILE_RANGES" = "0" ]; then
+            export SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=512
             EPLB_ARGS+="--moe-a2a-backend deepep --deepep-mode low_latency"
         else
             EPLB_ARGS+="--moe-a2a-backend deepep --deepep-mode normal"
@@ -69,10 +72,6 @@ fi
 
 if [ "$ENABLE_EXPERT_DISTRIBUTION_METRICS" = 1 ]; then
     EXPERT_DISTRIBUTION_METRICS_ARGS="--enable-expert-distribution-metrics"
-    if [ "$ARCHITECTURE" = "H" ]; then
-        export SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=512
-        EXPERT_DISTRIBUTION_METRICS_ARGS+=" --expert-distribution-recorder-mode stat_approx"
-    fi
 else
     EXPERT_DISTRIBUTION_METRICS_ARGS=""
 fi
@@ -121,3 +120,5 @@ else
 fi
 
 export SGLANG_DG_CACHE_DIR="$PWD/dg_cache_nnode${WORLD_SIZE}_rank${RANK}"
+export SGLANG_DEEPEP_STATS_DIR="$RESULT_DIR/deepep_stats"
+echo "[INFO] SGLANG_DEEPEP_STATS_DIR: $SGLANG_DEEPEP_STATS_DIR"

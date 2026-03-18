@@ -98,14 +98,69 @@ if [ $# -lt 2 ]; then
     exit 1
 fi
 
-DATE=$(date +%Y%m%d_%H%M%S)
+DATE=${DATE:-$(date +%Y%m%d_%H%M%S)}
+export DATE
 
 MOE_DENSE_TP=${MOE_DENSE_TP:-1} # Only None or 1 is valid for now
 
 LAUNCH_SERVER_SCRIPT="$1"
 BENCH_SCRIPT="$2"
-RESULT_DIR="results_v4/${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_moedensetp${MOE_DENSE_TP}_${DATE}"
-# RESULT_DIR="$3"
+
+# Multi-node RESULT_DIR synchronization via NFS shared file.
+# Node 0 writes RESULT_DIR to a sync file; other nodes wait and read it.
+# Skipped when RESULT_DIR is already set externally or in single-node mode.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SYNC_FILE="${SCRIPT_DIR}/.multi_node_result_dir_sync"
+SYNC_TIMEOUT=${SYNC_TIMEOUT:-120}
+SYNC_FILE_CREATED=0
+
+cleanup_sync_file() {
+    # Only node 0 cleans up the sync file, and only if this script created it.
+    if [ "${NNODES:-1}" -gt 1 ] && [ "${NODE_RANK:-0}" = "0" ] && [ "${SYNC_FILE_CREATED:-0}" -eq 1 ]; then
+        rm -f "$SYNC_FILE" 2>/dev/null || true
+        echo "[INFO] Node 0: sync file removed"
+    fi
+}
+trap cleanup_sync_file EXIT
+
+# Optional hard override: if RESULT_DIR_FIXED is set, always use it and skip sync/default logic.
+# This is useful when launching from different nodes without coordinating environment variables.
+if [ -n "${RESULT_DIR_FIXED:-}" ]; then
+    RESULT_DIR="$RESULT_DIR_FIXED"
+    echo "[INFO] RESULT_DIR_FIXED is set, using RESULT_DIR=$RESULT_DIR (skip sync/default logic)"
+fi
+
+if [ -z "${RESULT_DIR:-}" ]; then
+    if [ "$NNODES" -gt 1 ]; then
+        if [ "$NODE_RANK" = "0" ]; then
+            rm -f "$SYNC_FILE"
+            RESULT_DIR="results_v4/${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_moedensetp${MOE_DENSE_TP}_${DATE}"
+            echo "$RESULT_DIR" > "${SYNC_FILE}.tmp"
+            mv "${SYNC_FILE}.tmp" "$SYNC_FILE"
+            SYNC_FILE_CREATED=1
+            echo "[INFO] Node 0: RESULT_DIR written to sync file"
+        else
+            echo "[INFO] Node $NODE_RANK: waiting for RESULT_DIR sync from node 0..."
+            _sync_elapsed=0
+            while [ ! -f "$SYNC_FILE" ]; do
+                sleep 1
+                _sync_elapsed=$((_sync_elapsed + 1))
+                if [ $_sync_elapsed -ge $SYNC_TIMEOUT ]; then
+                    echo "[ERROR] Node $NODE_RANK: sync file not found after ${SYNC_TIMEOUT}s, aborting"
+                    exit 1
+                fi
+                if [ $((_sync_elapsed % 10)) -eq 0 ]; then
+                    echo "[INFO] Node $NODE_RANK: still waiting... (${_sync_elapsed}s)"
+                fi
+            done
+            RESULT_DIR=$(cat "$SYNC_FILE")
+            echo "[INFO] Node $NODE_RANK: synced RESULT_DIR=$RESULT_DIR"
+        fi
+    else
+        RESULT_DIR="results_v4/${MODEL_NAME}/dp${DP}_ep${EP}_tp${TP}_moedensetp${MOE_DENSE_TP}_${DATE}"
+    fi
+fi
+
 SERVER_LOG=$RESULT_DIR/server.log
 BENCH_LOG=$RESULT_DIR/bench.log
 

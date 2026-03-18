@@ -1,7 +1,7 @@
 
 ARCHITECTURE="H"
 ENABLE_EPLB=1
-ENABLE_EXPERT_DISTRIBUTION_METRICS=0
+ENABLE_EXPERT_DISTRIBUTION_METRICS=${ENABLE_EXPERT_DISTRIBUTION_METRICS:-0}
 PROFILE_RANGES=${PROFILE_RANGES:-"0"}
 USE_CUSTOM_MODEL=${USE_CUSTOM_MODEL:-0}
 
@@ -40,11 +40,11 @@ PROFILE_PREFIX=""
 if [ "$ENABLE_NSYS_PROFILE" -eq 1 ]; then
     # nsys output will be written under RESULT_DIR
     NSYS_OUT_BASENAME="$RESULT_DIR/nsys_profile"
-    PROFILE_PREFIX="nsys profile --trace-fork-before-exec=true --cuda-graph-trace=node --capture-range=cudaProfilerApi --capture-range-end=stop -o $NSYS_OUT_BASENAME "
+    PROFILE_PREFIX="nsys profile --trace-fork-before-exec=true --cuda-graph-trace=node --capture-range=cudaProfilerApi --capture-range-end=repeat -o $NSYS_OUT_BASENAME "
 fi
 
+# --load-format dummy \
 RUN_ARGS="
---load-format dummy \
 --watchdog-timeout 3600 \
 --dist-timeout 3600 \
 "
@@ -58,7 +58,7 @@ ${PROFILE_PREFIX}python $MODULE_NAME \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
-    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS
+    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS $ADD_ARGS
 """ > $RESULT_DIR/command_node$NODE_RANK.log
 
 set -x
@@ -69,7 +69,7 @@ ${PROFILE_PREFIX}python $MODULE_NAME \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
-    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS 2>&1 | tee $RESULT_DIR/run_node$NODE_RANK.log 
+    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS $ADD_ARGS 2>&1 | tee $RESULT_DIR/run_node$NODE_RANK.log 
 set +x
 
 BENCH_EXIT_CODE=$?
