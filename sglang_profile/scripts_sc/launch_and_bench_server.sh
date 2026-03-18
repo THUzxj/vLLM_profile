@@ -161,12 +161,12 @@ if [ -z "${RESULT_DIR:-}" ]; then
             echo "[INFO] Node $NODE_RANK: synced RESULT_DIR=$RESULT_DIR"
         fi
     else
-        RESULT_DIR="results_v4/${MODEL_NAME}/dp${DP}_TBO${ENABLE_TBO}_NORMAL${PROFILE_RANGES}_${DATE}"
+        RESULT_DIR="results_v4/${MODEL_NAME}/dp${DP}_TBO${ENABLE_TBO}_NORMAL${PROFILE_RANGES}_RANK${RANK}_${DATE}"
     fi
 fi
 
-SERVER_LOG=$RESULT_DIR/server.log
-BENCH_LOG=$RESULT_DIR/bench.log
+SERVER_LOG=$RESULT_DIR/server_rank${RANK}.log
+BENCH_LOG=$RESULT_DIR/bench_rank${RANK}.log
 
 # Check if scripts exist
 if [ ! -f "$LAUNCH_SERVER_SCRIPT" ]; then
