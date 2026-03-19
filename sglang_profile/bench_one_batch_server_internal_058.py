@@ -7,6 +7,7 @@ import os
 import random
 import re
 import time
+from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 import numpy as np
@@ -21,13 +22,58 @@ from sglang.bench_serving import (
     sample_mmmu_requests,
     sample_random_requests,
 )
-from sglang.profiler import run_profile
 from sglang.srt.entrypoints.http_server import launch_server
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import is_blackwell, kill_process_tree
 from sglang.test.test_utils import is_in_ci, write_github_step_summary
 
 DEFAULT_TIMEOUT = 600
+DEFAULT_PROFILE_STAGES = ["decode"]
+
+
+def run_profile_with_stages(
+    url: str,
+    num_steps: int,
+    activities: List[str],
+    output_dir: Optional[str] = None,
+    profile_by_stage: bool = False,
+    merge_profiles: bool = False,
+    profile_prefix: Optional[str] = None,
+    profile_stages: Optional[List[str]] = None,
+) -> str:
+    if output_dir is None:
+        output_dir = os.getenv("SGLANG_TORCH_PROFILER_DIR", "/tmp")
+
+    output_dir = Path(os.path.abspath(os.path.normpath(output_dir))) / str(time.time())
+    output_dir.mkdir(exist_ok=True, parents=True)
+
+    print(f"Dump profiling traces to {output_dir}")
+    print(
+        f"Waiting for {num_steps} steps and the trace to be flushed.... ({profile_by_stage=}, {profile_stages=})"
+    )
+
+    file_path = Path(output_dir) / "server_args.json"
+    if not file_path.exists():
+        response = requests.get(url + "/get_server_info")
+        response.raise_for_status()
+        server_args_data = response.json()
+        with open(file_path, "w") as file:
+            file.write(json.dumps(server_args_data))
+
+    json_data = {
+        "output_dir": str(output_dir),
+        "num_steps": str(num_steps),
+        "activities": activities,
+        "profile_by_stage": profile_by_stage,
+        "merge_profiles": merge_profiles,
+        "profile_prefix": profile_prefix,
+    }
+    if profile_stages is not None:
+        json_data["profile_stages"] = profile_stages
+
+    response = requests.post(url=url + "/start_profile", json=json_data)
+    response.raise_for_status()
+    return str(output_dir)
 
 
 def get_cache_tokens_from_metrics(url: str) -> Optional[tuple]:
@@ -112,6 +158,7 @@ class BenchArgs:
     measure: bool = False
     profile_activities: Optional[List[str]] = None
     use_nsys: bool = False
+    profile_stages: Optional[List[str]] = None
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -215,6 +262,13 @@ class BenchArgs:
             default=BenchArgs.use_nsys,
             help="Use nsys profiling (CUDA_PROFILER). If set, profile_activities will be automatically set to ['CUDA_PROFILER'] unless --profile-activities is explicitly specified.",
         )
+        parser.add_argument(
+            "--profile-stages",
+            type=str,
+            nargs="+",
+            default=BenchArgs.profile_stages,
+            help="Profile stages for /start_profile, e.g. decode prefill. Default: decode only.",
+        )
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
@@ -224,6 +278,10 @@ class BenchArgs:
         # If use_nsys is True and profile_activities is not explicitly set, use CUDA_PROFILER
         if instance.use_nsys and instance.profile_activities is None:
             instance.profile_activities = ["CUDA_PROFILER"]
+
+        # Default to decode-only profiling unless explicitly provided.
+        if instance.profile_stages is None:
+            instance.profile_stages = DEFAULT_PROFILE_STAGES.copy()
         
         return instance
 
@@ -375,6 +433,7 @@ def run_one_case(
     parallel_batch: bool = False,
     cache_hit_rate: float = BenchArgs.cache_hit_rate,
     profile_activities: Optional[List[str]] = None,
+    profile_stages: Optional[List[str]] = None,
 ):
     response = requests.post(url + "/flush_cache", timeout=DEFAULT_TIMEOUT)
     response.raise_for_status()
@@ -468,13 +527,14 @@ def run_one_case(
     if profile:
         # Use provided activities or default to ["CPU", "GPU"]
         activities = profile_activities if profile_activities is not None else ["CPU", "GPU"]
-        profile_link: str = run_profile(
+        profile_link: str = run_profile_with_stages(
             url=url,
             num_steps=profile_steps,
             activities=activities,
             output_dir=profile_output_dir,
             profile_by_stage=profile_by_stage,
             profile_prefix=profile_prefix,
+            profile_stages=profile_stages or DEFAULT_PROFILE_STAGES,
         )
 
     # Get metrics before the request (for cache hit rate calculation)
@@ -830,6 +890,7 @@ def run_benchmark_internal(
                             profile_prefix=profile_prefix,
                             profile_output_dir=bench_args.profile_output_dir,
                             profile_activities=bench_args.profile_activities,
+                            profile_stages=bench_args.profile_stages,
                         )
                     )
             except Exception as e:
