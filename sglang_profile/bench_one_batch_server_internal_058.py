@@ -159,6 +159,7 @@ class BenchArgs:
     profile_activities: Optional[List[str]] = None
     use_nsys: bool = False
     profile_stages: Optional[List[str]] = None
+    merge_profiles: bool = False
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -268,6 +269,12 @@ class BenchArgs:
             nargs="+",
             default=BenchArgs.profile_stages,
             help="Profile stages for /start_profile, e.g. decode prefill. Default: decode only.",
+        )
+        parser.add_argument(
+            "--merge-profiles",
+            action="store_true",
+            default=BenchArgs.merge_profiles,
+            help="Merge profile traces from all ranks (TP/DP/PP/EP) into a single trace file.",
         )
 
     @classmethod
@@ -434,6 +441,7 @@ def run_one_case(
     cache_hit_rate: float = BenchArgs.cache_hit_rate,
     profile_activities: Optional[List[str]] = None,
     profile_stages: Optional[List[str]] = None,
+    merge_profiles: bool = False,
 ):
     response = requests.post(url + "/flush_cache", timeout=DEFAULT_TIMEOUT)
     response.raise_for_status()
@@ -535,6 +543,7 @@ def run_one_case(
             profile_by_stage=profile_by_stage,
             profile_prefix=profile_prefix,
             profile_stages=profile_stages or DEFAULT_PROFILE_STAGES,
+            merge_profiles=merge_profiles,
         )
 
     # Get metrics before the request (for cache hit rate calculation)
@@ -891,6 +900,7 @@ def run_benchmark_internal(
                             profile_output_dir=bench_args.profile_output_dir,
                             profile_activities=bench_args.profile_activities,
                             profile_stages=bench_args.profile_stages,
+                            merge_profiles=bench_args.merge_profiles,
                         )
                     )
             except Exception as e:
