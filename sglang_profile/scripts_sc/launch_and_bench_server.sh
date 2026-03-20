@@ -11,6 +11,8 @@ NODE_RANK=${RANK:-0}
 NNODES=${WORLD_SIZE:-1}
 ARCHITECTURE=${ARCHITECTURE:-"H"}
 ENABLE_TBO=${ENABLE_TBO:-0}
+EP_NUM_REDUNDANT_EXPERTS=${EP_NUM_REDUNDANT_EXPERTS:-0}
+PROFILE_RANGES=${PROFILE_RANGES:-0}
 
 # Only allow Nsight Systems profiling on rank 0
 # If ENABLE_NSYS_PROFILE is set for multi-node runs, non-zero ranks will have it disabled.
@@ -134,11 +136,14 @@ if [ -n "${RESULT_DIR_FIXED:-}" ]; then
     echo "[INFO] RESULT_DIR_FIXED is set, using RESULT_DIR=$RESULT_DIR (skip sync/default logic)"
 fi
 
+
+RESULT_TAG="dp${DP}_TBO${ENABLE_TBO}_NORMAL${PROFILE_RANGES}_REDUNDANT${EP_NUM_REDUNDANT_EXPERTS}"
+
 if [ -z "${RESULT_DIR:-}" ]; then
     if [ "$NNODES" -gt 1 ]; then
         if [ "$NODE_RANK" = "0" ]; then
             rm -f "$SYNC_FILE"
-            RESULT_DIR="results_v4/${MODEL_NAME}/dp${DP}_TBO${ENABLE_TBO}_NORMAL${PROFILE_RANGES}_${DATE}"
+            RESULT_DIR="results_v4/${MODEL_NAME}/${RESULT_TAG}_${DATE}"
             echo "$RESULT_DIR" > "${SYNC_FILE}.tmp"
             mv "${SYNC_FILE}.tmp" "$SYNC_FILE"
             SYNC_FILE_CREATED=1
@@ -161,7 +166,7 @@ if [ -z "${RESULT_DIR:-}" ]; then
             echo "[INFO] Node $NODE_RANK: synced RESULT_DIR=$RESULT_DIR"
         fi
     else
-        RESULT_DIR="results_v4/${MODEL_NAME}/dp${DP}_TBO${ENABLE_TBO}_NORMAL${PROFILE_RANGES}_RANK${RANK}_${DATE}"
+        RESULT_DIR="results_v4/${MODEL_NAME}/${RESULT_TAG}_RANK${RANK}_${DATE}"
     fi
 fi
 
