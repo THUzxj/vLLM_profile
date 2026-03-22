@@ -57,4 +57,4 @@ if [ $BENCH_EXIT_CODE -ne 0 ]; then
     exit $BENCH_EXIT_CODE
 fi
 
-echo "[INFO] Node $NODE_RANK: All tasks completed"
+echo "[INFO] Node $RANK: All tasks completed"

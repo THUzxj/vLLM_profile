@@ -35,7 +35,7 @@ RESULT_FILENAME="$RESULT_DIR/result.log"
 
 echo "=========================================="
 echo "Running with $NNODES node(s): DP=$DP, EP=$EP, TP=$TP"
-echo "NODE_RANK=$NODE_RANK"
+echo "RANK=$RANK"
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 if [ "$NNODES" -gt 1 ]; then
     echo "DIST_INIT_ADDR=$DIST_INIT_ADDR"
@@ -43,7 +43,7 @@ fi
 echo "=========================================="
 
 # Run the benchmark (all nodes execute this)
-echo "[INFO] Starting benchmark on node $NODE_RANK..."
+echo "[INFO] Starting benchmark on node $RANK..."
 
 echo """
 python $MODULE_NAME \
@@ -52,8 +52,8 @@ python $MODULE_NAME \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
-    $LOG_ARGS $METRICS_ARGS $MULTI_NODE_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS 2>&1 | tee "$RESULT_DIR/run_node$NODE_RANK.log"
-""" > $RESULT_DIR/command_node$NODE_RANK.log
+    $LOG_ARGS $METRICS_ARGS $MULTI_NODE_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS 2>&1 | tee "$RESULT_DIR/run_node$RANK.log"
+""" > $RESULT_DIR/command_node$RANK.log
 
 set -x
 python $MODULE_NAME \
@@ -62,14 +62,14 @@ python $MODULE_NAME \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
-    $LOG_ARGS $METRICS_ARGS $MULTI_NODE_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS 2>&1 | tee "$RESULT_DIR/run_node$NODE_RANK.log"
+    $LOG_ARGS $METRICS_ARGS $MULTI_NODE_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS 2>&1 | tee "$RESULT_DIR/run_node$RANK.log"
 set +x
 
 BENCH_EXIT_CODE=$?
 
 if [ $BENCH_EXIT_CODE -ne 0 ]; then
-    echo "[ERROR] Benchmark failed with exit code $BENCH_EXIT_CODE on node $NODE_RANK"
+    echo "[ERROR] Benchmark failed with exit code $BENCH_EXIT_CODE on node $RANK"
     exit $BENCH_EXIT_CODE
 fi
 
-echo "[INFO] Node $NODE_RANK: All tasks completed"
+echo "[INFO] Node $RANK: All tasks completed"
