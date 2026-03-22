@@ -96,18 +96,55 @@ fi
 # export LOGGING_CHUNCKED_PREFILL=True
 
 # distribution settings
-NODE_RANK=${RANK:-0}
-NNODES=${WORLD_SIZE:-1}
+RANK=${RANK:-0}
+WORLD_SIZE=${WORLD_SIZE:-1}
 GPUS_PER_NODE=${KUBERNETES_CONTAINER_RESOURCE_GPU:-8}
 MASTER_ADDR=${MASTER_ADDR:-localhost}
 MASTER_PORT=${MASTER_PORT:-29500}
 
+# PD disaggregation configuration
+# Set ENABLE_PD_DISAGG=1 to enable PD disaggregation mode
+# PREFILL_NODES: number of prefill nodes
+# DECODE_NODES: number of decode nodes
+ENABLE_PD_DISAGG=${ENABLE_PD_DISAGG:-0}
+PREFILL_NODES=${PREFILL_NODES:-1}
+DECODE_NODES=${DECODE_NODES:-1}
+
 MULTI_NODE_ARGS=""
-if [ "$NNODES" -gt 1 ]; then
-    MULTI_NODE_ARGS="--nnodes $NNODES --node-rank $NODE_RANK --dist-init-addr $MASTER_ADDR:$MASTER_PORT"
-    echo "[INFO] Multi-node mode: NNODES=$NNODES, NODE_RANK=$NODE_RANK, DIST_INIT_ADDR=$MASTER_ADDR:$MASTER_PORT"
-else 
-    echo "[INFO] Single-node mode: NNODES=$NNODES, NODE_RANK=$NODE_RANK"
+if [ "$WORLD_SIZE" -gt 1 ]; then
+    # PD disaggregation mode assignment based on RANK
+    if [ "$ENABLE_PD_DISAGG" -eq 1 ]; then
+        TOTAL_PD_NODES=$((PREFILL_NODES + DECODE_NODES))
+        if [ "$WORLD_SIZE" -ne "$TOTAL_PD_NODES" ]; then
+            echo "[WARN] WORLD_SIZE=$WORLD_SIZE does not match PREFILL_NODES+DECODE_NODES=$TOTAL_PD_NODES"
+        fi
+
+        if [ "$RANK" -lt "$PREFILL_NODES" ]; then
+            DISAGG_MODE="prefill"
+            DISAGG_NNODES=$PREFILL_NODES
+            DISAGG_RANK=$RANK
+            DISAGG_DIST_ADDR=$MASTER_ADDR
+            echo "[INFO] Node $RANK assigned as PREFILL node (internal rank=$DISAGG_RANK, nnodes=$DISAGG_NNODES)"
+        elif [ "$RANK" -lt "$TOTAL_PD_NODES" ]; then
+            DISAGG_MODE="decode"
+            DISAGG_NNODES=$DECODE_NODES
+            DISAGG_RANK=$((RANK - PREFILL_NODES))
+            # Decode nodes connect to the last prefill worker
+            PREFILL_WORKER_NUM=$((PREFILL_NODES - 1))
+            DISAGG_DIST_ADDR="${DLC_JOB_ID}-worker-${PREFILL_WORKER_NUM}"
+            echo "[INFO] Node $RANK assigned as DECODE node (internal rank=$DISAGG_RANK, nnodes=$DISAGG_NNODES)"
+        else
+            echo "[ERROR] RANK=$RANK exceeds total PD nodes ($TOTAL_PD_NODES)"
+            exit 1
+        fi
+        MULTI_NODE_ARGS="--host 0.0.0.0 --nnodes $DISAGG_NNODES --node-rank $DISAGG_RANK --dist-init-addr $DISAGG_DIST_ADDR:$MASTER_PORT"
+        MULTI_NODE_ARGS+=" --disaggregation-mode $DISAGG_MODE"
+    else
+        MULTI_NODE_ARGS="--host 0.0.0.0 --nnodes $WORLD_SIZE --node-rank $RANK --dist-init-addr $MASTER_ADDR:$MASTER_PORT"
+        echo "[INFO] Multi-node mode: WORLD_SIZE=$WORLD_SIZE, RANK=$RANK, DIST_INIT_ADDR=$MASTER_ADDR:$MASTER_PORT"
+    fi
+else
+    echo "[INFO] Single-node mode: WORLD_SIZE=$WORLD_SIZE, RANK=$RANK"
 fi
 
 export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
