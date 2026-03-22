@@ -160,6 +160,7 @@ class BenchArgs:
     use_nsys: bool = False
     profile_stages: Optional[List[str]] = None
     merge_profiles: bool = False
+    profile_url: Optional[str] = None
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -275,6 +276,12 @@ class BenchArgs:
             action="store_true",
             default=BenchArgs.merge_profiles,
             help="Merge profile traces from all ranks (TP/DP/PP/EP) into a single trace file.",
+        )
+        parser.add_argument(
+            "--profile-url",
+            type=str,
+            default=BenchArgs.profile_url,
+            help="URL for profiling in PD-separated mode. If not specified, uses --base-url for profiling.",
         )
 
     @classmethod
@@ -442,6 +449,7 @@ def run_one_case(
     profile_activities: Optional[List[str]] = None,
     profile_stages: Optional[List[str]] = None,
     merge_profiles: bool = False,
+    profile_url: Optional[str] = None,
 ):
     response = requests.post(url + "/flush_cache", timeout=DEFAULT_TIMEOUT)
     response.raise_for_status()
@@ -535,8 +543,10 @@ def run_one_case(
     if profile:
         # Use provided activities or default to ["CPU", "GPU"]
         activities = profile_activities if profile_activities is not None else ["CPU", "GPU"]
+        # Use profile_url if provided (for PD-separated mode), otherwise use url
+        effective_profile_url = profile_url if profile_url else url
         profile_link: str = run_profile_with_stages(
-            url=url,
+            url=effective_profile_url,
             num_steps=profile_steps,
             activities=activities,
             output_dir=profile_output_dir,
@@ -901,6 +911,7 @@ def run_benchmark_internal(
                             profile_activities=bench_args.profile_activities,
                             profile_stages=bench_args.profile_stages,
                             merge_profiles=bench_args.merge_profiles,
+                            profile_url=bench_args.profile_url,
                         )
                     )
             except Exception as e:
