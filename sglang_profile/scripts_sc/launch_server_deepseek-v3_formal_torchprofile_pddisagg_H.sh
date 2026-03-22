@@ -31,6 +31,10 @@ MODULE_NAME=${MODULE_NAME:-"-m sglang.launch_server"}
 # Source common arguments
 source "$(dirname "$0")/common_serve_args.sh"
 
+# Router configuration (only started on rank 0)
+ROUTER_PORT=${ROUTER_PORT:-9001}
+ROUTER_POLICY=${ROUTER_POLICY:-"cache_aware"}
+
 # Allow RESULT_DIR to be passed from external script
 # If not provided, use default pattern
 # Usage: RESULT_DIR=/path/to/results ./launch_server_deepseek-v3_formal_torchprofile_mapping_H.sh
@@ -42,6 +46,33 @@ fi
 mkdir -p "$RESULT_DIR"
 
 RESULT_FILENAME="$RESULT_DIR/result.log"
+
+# Build router arguments and start router on rank 0 before server
+if [ "$ENABLE_PD_DISAGG" -eq 1 ] && [ "$RANK" -eq 0 ]; then
+    # Build prefill URLs (prefill hosts use ${DLC_JOB_ID}-master-{rank})
+    ROUTER_PREFILL_ARGS="--prefill http://${DLC_JOB_ID}-master-0:30000 ${ROUTER_PORT}"
+
+    for i in $(seq 0 $((PREFILL_NODES - 2))); do
+        PREFILL_HOST="${DLC_JOB_ID}-worker-${i}"
+        ROUTER_PREFILL_ARGS="$ROUTER_PREFILL_ARGS --prefill http://${PREFILL_HOST}:30000"
+    done
+
+    # Build decode URLs (decode hosts use ${DLC_JOB_ID}-worker-{rank})
+    ROUTER_DECODE_ARGS=""
+    for i in $(seq $((PREFILL_NODES - 1)) $((TOTAL_PD_NODES - 2))); do
+        DECODE_HOST="${DLC_JOB_ID}-worker-${i}"
+        ROUTER_DECODE_ARGS="$ROUTER_DECODE_ARGS --decode http://${DECODE_HOST}:30000"
+    done
+
+    echo "[INFO] Starting router with: prefill_nodes=$PREFILL_NODES, decode_nodes=$DECODE_NODES"
+    python3 -m sglang_router.launch_router \
+        --pd-disaggregation \
+        $ROUTER_PREFILL_ARGS \
+        $ROUTER_DECODE_ARGS \
+        --policy $ROUTER_POLICY &
+    ROUTER_PID=$!
+    echo "[INFO] Router started with PID $ROUTER_PID on port $ROUTER_PORT"
+fi
 
 # Optional Nsight Systems profiling (capture-range mode)
 PROFILE_PREFIX=""
