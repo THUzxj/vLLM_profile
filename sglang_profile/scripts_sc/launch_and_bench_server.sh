@@ -13,6 +13,7 @@ ARCHITECTURE=${ARCHITECTURE:-"H"}
 ENABLE_TBO=${ENABLE_TBO:-0}
 EP_NUM_REDUNDANT_EXPERTS=${EP_NUM_REDUNDANT_EXPERTS:-0}
 PROFILE_RANGES=${PROFILE_RANGES:-0}
+ONLY_LAUNCH=${ONLY_LAUNCH:-0}
 
 # Only allow Nsight Systems profiling on rank 0
 # If ENABLE_NSYS_PROFILE is set for multi-node runs, non-zero ranks will have it disabled.
@@ -71,6 +72,13 @@ launch_and_wait_server() {
     # Launch server in background with RESULT_DIR and DATE exported
     # Enable job control to get the correct process group ID
 
+    # When ONLY_LAUNCH=1, all nodes (including rank 0) run server synchronously
+    if [ "$ONLY_LAUNCH" = "1" ]; then
+        echo "[INFO] ONLY_LAUNCH=1, running server synchronously on all nodes"
+        export RESULT_DIR="$server_result_dir"
+        bash "$server_script" 2>&1 | tee "$server_log"
+        return $?
+    fi
 
     if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
         export RESULT_DIR="$server_result_dir"
@@ -206,6 +214,15 @@ mkdir -p "$SERVER_RESULT_DIR"
 if ! launch_and_wait_server "$LAUNCH_SERVER_SCRIPT" "$SERVER_LOG" "$SERVER_RESULT_DIR" $SERVER_READY_TIMEOUT $SERVER_READY_CHECK_INTERVAL; then
     echo "[ERROR] Server launch failed"
     exit 1
+fi
+
+# If ONLY_LAUNCH=1, skip benchmark (server runs synchronously and exits on its own)
+if [ "$ONLY_LAUNCH" = "1" ]; then
+    echo "[INFO] ONLY_LAUNCH=1, skipping benchmark"
+    echo "=========================================="
+    echo "Server-only mode completed!"
+    echo "=========================================="
+    exit 0
 fi
 
 # Server is ready, run benchmark with RESULT_DIR set
