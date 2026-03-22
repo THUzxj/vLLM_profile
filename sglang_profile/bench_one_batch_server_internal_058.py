@@ -461,6 +461,8 @@ def run_one_case(
     response = requests.post(url + "/flush_cache", timeout=DEFAULT_TIMEOUT)
     response.raise_for_status()
 
+    effective_decode_url = decode_url if decode_url else url
+
     # Load input token ids
     # TODO: reuse bench_serving.get_dataset ?
     if dataset_name == "mmmu":
@@ -564,7 +566,7 @@ def run_one_case(
         )
 
     # Get metrics before the request (for cache hit rate calculation)
-    metrics_before = get_cache_tokens_from_metrics(url)
+    metrics_before = get_cache_tokens_from_metrics(effective_decode_url)
 
     # Log request count before send and compare with bs
     print(
@@ -631,7 +633,7 @@ def run_one_case(
     acc_length = internal_state[0].get("avg_spec_accept_length", None) or -1
 
     # Calculate cache hit rate from before/after metrics delta
-    metrics_after = get_cache_tokens_from_metrics(url)
+    metrics_after = get_cache_tokens_from_metrics(effective_decode_url)
     metrics_cache_hit_rate = calculate_cache_hit_rate(metrics_before, metrics_after)
 
     # Print results
