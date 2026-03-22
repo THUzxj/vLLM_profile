@@ -50,26 +50,6 @@ LONG_CONTEXT_ARGS=(
     '{"rope_scaling": {"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32768}}'
 )
 
-
-if [ "$ENABLE_EPLB" = 1 ]; then
-    EPLB_ARGS="""
-    --enable-eplb \
-    --eplb-rebalance-num-iterations 1000 \
-    --ep-num-redundant-experts ${EP_NUM_REDUNDANT_EXPERTS:-0} \
-    """
-
-    if [ "$ARCHITECTURE" = "H" ]; then
-        if [ "$PROFILE_RANGES" = "0" ]; then
-            export SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=512
-            EPLB_ARGS+="--moe-a2a-backend deepep --deepep-mode low_latency"
-        else
-            EPLB_ARGS+="--moe-a2a-backend deepep --deepep-mode normal"
-        fi
-    fi
-else
-    EPLB_ARGS=""
-fi
-
 if [ "$ENABLE_EXPERT_DISTRIBUTION_METRICS" = 1 ]; then
     EXPERT_DISTRIBUTION_METRICS_ARGS="--enable-expert-distribution-metrics"
 else
@@ -146,6 +126,27 @@ if [ "$WORLD_SIZE" -gt 1 ]; then
 else
     echo "[INFO] Single-node mode: WORLD_SIZE=$WORLD_SIZE, RANK=$RANK"
 fi
+
+
+if [ "$ENABLE_EPLB" = 1 ]; then
+    EPLB_ARGS="""
+    --enable-eplb \
+    --eplb-rebalance-num-iterations 1000 \
+    --ep-num-redundant-experts ${EP_NUM_REDUNDANT_EXPERTS:-0} \
+    """
+
+    if [ "$ARCHITECTURE" = "H" ]; then
+        if [ "$PROFILE_RANGES" = "0" || "$DISAGG_MODE" = "decode" ]; then
+            export SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=512
+            EPLB_ARGS+="--moe-a2a-backend deepep --deepep-mode low_latency"
+        else
+            EPLB_ARGS+="--moe-a2a-backend deepep --deepep-mode normal"
+        fi
+    fi
+else
+    EPLB_ARGS=""
+fi
+
 
 export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
 
