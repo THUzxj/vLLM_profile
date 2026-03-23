@@ -43,6 +43,16 @@ def main() -> int:
         help="Profile id prefix used to discover trace files.",
     )
     parser.add_argument(
+        "--prefix",
+        default=None,
+        help="If set, only merge files whose basename starts with this prefix.",
+    )
+    parser.add_argument(
+        "--suffix",
+        default=None,
+        help="If set, only merge files whose basename ends with this suffix.",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"],
@@ -53,7 +63,12 @@ def main() -> int:
     _setup_logging(args.log_level)
 
     ProfileMerger = _import_profile_merger()
-    merger = ProfileMerger(output_dir=args.output_dir, profile_id=args.profile_id)
+    merger = ProfileMerger(
+        output_dir=args.output_dir,
+        profile_id=args.profile_id,
+        prefix=args.prefix,
+        suffix=args.suffix,
+    )
     merged_path = merger.merge_chrome_traces()
     print(merged_path)
     return 0

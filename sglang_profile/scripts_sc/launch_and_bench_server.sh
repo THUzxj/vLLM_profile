@@ -11,6 +11,9 @@ NODE_RANK=${RANK:-0}
 NNODES=${WORLD_SIZE:-1}
 ARCHITECTURE=${ARCHITECTURE:-"H"}
 ENABLE_TBO=${ENABLE_TBO:-0}
+EP_NUM_REDUNDANT_EXPERTS=${EP_NUM_REDUNDANT_EXPERTS:-0}
+PROFILE_RANGES=${PROFILE_RANGES:-0}
+ONLY_LAUNCH=${ONLY_LAUNCH:-0}
 
 # Only allow Nsight Systems profiling on rank 0
 # If ENABLE_NSYS_PROFILE is set for multi-node runs, non-zero ranks will have it disabled.
@@ -69,6 +72,13 @@ launch_and_wait_server() {
     # Launch server in background with RESULT_DIR and DATE exported
     # Enable job control to get the correct process group ID
 
+    # When ONLY_LAUNCH=1, all nodes (including rank 0) run server synchronously
+    if [ "$ONLY_LAUNCH" = "1" ]; then
+        echo "[INFO] ONLY_LAUNCH=1, running server synchronously on all nodes"
+        export RESULT_DIR="$server_result_dir"
+        bash "$server_script" 2>&1 | tee "$server_log"
+        return $?
+    fi
 
     if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
         export RESULT_DIR="$server_result_dir"
@@ -134,11 +144,14 @@ if [ -n "${RESULT_DIR_FIXED:-}" ]; then
     echo "[INFO] RESULT_DIR_FIXED is set, using RESULT_DIR=$RESULT_DIR (skip sync/default logic)"
 fi
 
+
+RESULT_TAG="dp${DP}_TBO${ENABLE_TBO}_NORMAL${PROFILE_RANGES}_REDUNDANT${EP_NUM_REDUNDANT_EXPERTS}"
+
 if [ -z "${RESULT_DIR:-}" ]; then
     if [ "$NNODES" -gt 1 ]; then
         if [ "$NODE_RANK" = "0" ]; then
             rm -f "$SYNC_FILE"
-            RESULT_DIR="results_v4/${MODEL_NAME}/dp${DP}_TBO${ENABLE_TBO}_NORMAL${PROFILE_RANGES}_${DATE}"
+            RESULT_DIR="results_v4/${MODEL_NAME}/${RESULT_TAG}_${DATE}"
             echo "$RESULT_DIR" > "${SYNC_FILE}.tmp"
             mv "${SYNC_FILE}.tmp" "$SYNC_FILE"
             SYNC_FILE_CREATED=1
@@ -161,7 +174,7 @@ if [ -z "${RESULT_DIR:-}" ]; then
             echo "[INFO] Node $NODE_RANK: synced RESULT_DIR=$RESULT_DIR"
         fi
     else
-        RESULT_DIR="results_v4/${MODEL_NAME}/dp${DP}_TBO${ENABLE_TBO}_NORMAL${PROFILE_RANGES}_RANK${RANK}_${DATE}"
+        RESULT_DIR="results_v4/${MODEL_NAME}/${RESULT_TAG}_RANK${RANK}_${DATE}"
     fi
 fi
 
@@ -201,6 +214,15 @@ mkdir -p "$SERVER_RESULT_DIR"
 if ! launch_and_wait_server "$LAUNCH_SERVER_SCRIPT" "$SERVER_LOG" "$SERVER_RESULT_DIR" $SERVER_READY_TIMEOUT $SERVER_READY_CHECK_INTERVAL; then
     echo "[ERROR] Server launch failed"
     exit 1
+fi
+
+# If ONLY_LAUNCH=1, skip benchmark (server runs synchronously and exits on its own)
+if [ "$ONLY_LAUNCH" = "1" ]; then
+    echo "[INFO] ONLY_LAUNCH=1, skipping benchmark"
+    echo "=========================================="
+    echo "Server-only mode completed!"
+    echo "=========================================="
+    exit 0
 fi
 
 # Server is ready, run benchmark with RESULT_DIR set

@@ -35,8 +35,10 @@ mkdir -p "$RESULT_DIR"
 export SGLANG_TORCH_PROFILER_DIR="$RESULT_DIR/torch_profile"
 mkdir -p "$SGLANG_TORCH_PROFILER_DIR"
 
+BASE_PORT=${BASE_PORT:-30000}
+
 echo "python bench_one_batch_server_058.py \
-    --base-url http://127.0.0.1:30000 \
+    --base-url http://127.0.0.1:$BASE_PORT \
     --model-path $MODEL_PATH \
     --batch-size $BS --input-len $IL --output-len $OL \
     --profile --profile-by-stage --profile-steps $PROFILE_STEPS \
@@ -46,7 +48,7 @@ echo "python bench_one_batch_server_058.py \
 " > $RESULT_DIR/command.log
 
 python bench_one_batch_server_058.py \
- --base-url http://127.0.0.1:30000 \
+ --base-url http://127.0.0.1:$BASE_PORT \
  --model-path $MODEL_PATH \
  --batch-size $BS --input-len $IL --output-len $OL \
  --profile --profile-by-stage --profile-steps $PROFILE_STEPS \

@@ -160,6 +160,8 @@ class BenchArgs:
     use_nsys: bool = False
     profile_stages: Optional[List[str]] = None
     merge_profiles: bool = False
+    decode_url: Optional[str] = None
+    prefill_url: Optional[str] = None
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -275,6 +277,18 @@ class BenchArgs:
             action="store_true",
             default=BenchArgs.merge_profiles,
             help="Merge profile traces from all ranks (TP/DP/PP/EP) into a single trace file.",
+        )
+        parser.add_argument(
+            "--decode-url",
+            type=str,
+            default=BenchArgs.decode_url,
+            help="URL for profiling decode workers in PD-separated mode. If not specified, uses --base-url for profiling.",
+        )
+        parser.add_argument(
+            "--prefill-url",
+            type=str,
+            default=BenchArgs.prefill_url,
+            help="URL for getting server info in PD-separated mode. If not specified, uses --base-url.",
         )
 
     @classmethod
@@ -442,9 +456,12 @@ def run_one_case(
     profile_activities: Optional[List[str]] = None,
     profile_stages: Optional[List[str]] = None,
     merge_profiles: bool = False,
+    decode_url: Optional[str] = None,
 ):
     response = requests.post(url + "/flush_cache", timeout=DEFAULT_TIMEOUT)
     response.raise_for_status()
+
+    effective_decode_url = decode_url if decode_url else url
 
     # Load input token ids
     # TODO: reuse bench_serving.get_dataset ?
@@ -535,8 +552,10 @@ def run_one_case(
     if profile:
         # Use provided activities or default to ["CPU", "GPU"]
         activities = profile_activities if profile_activities is not None else ["CPU", "GPU"]
+        # Use decode_url if provided (for PD-separated mode), otherwise use url
+        effective_decode_url = decode_url if decode_url else url
         profile_link: str = run_profile_with_stages(
-            url=url,
+            url=effective_decode_url,
             num_steps=profile_steps,
             activities=activities,
             output_dir=profile_output_dir,
@@ -547,7 +566,7 @@ def run_one_case(
         )
 
     # Get metrics before the request (for cache hit rate calculation)
-    metrics_before = get_cache_tokens_from_metrics(url)
+    metrics_before = get_cache_tokens_from_metrics(effective_decode_url)
 
     # Log request count before send and compare with bs
     print(
@@ -604,7 +623,9 @@ def run_one_case(
     output_throughput = batch_size * output_len / (latency - last_ttft)
     overall_throughput = batch_size * (input_len + output_len) / latency
 
-    response = requests.get(url + "/get_server_info", timeout=DEFAULT_TIMEOUT)
+
+    effective_decode_url = decode_url if decode_url else url
+    response = requests.get(effective_decode_url + "/get_server_info", timeout=DEFAULT_TIMEOUT)
     response.raise_for_status()
     server_info = response.json()
     internal_state = server_info.get("internal_states", [{}])
@@ -612,7 +633,7 @@ def run_one_case(
     acc_length = internal_state[0].get("avg_spec_accept_length", None) or -1
 
     # Calculate cache hit rate from before/after metrics delta
-    metrics_after = get_cache_tokens_from_metrics(url)
+    metrics_after = get_cache_tokens_from_metrics(effective_decode_url)
     metrics_cache_hit_rate = calculate_cache_hit_rate(metrics_before, metrics_after)
 
     # Print results
@@ -775,7 +796,9 @@ def run_benchmark_internal(
         proc, base_url = launch_server_process(launch_server_func, server_args)
 
     # Get tokenizer
-    response = requests.get(base_url + "/get_server_info", timeout=DEFAULT_TIMEOUT)
+    # Use prefill_url for server info if provided (PD-separated mode)
+    server_info_url = bench_args.prefill_url if bench_args.prefill_url else base_url
+    response = requests.get(server_info_url + "/get_server_info", timeout=DEFAULT_TIMEOUT)
     response.raise_for_status()
     server_info = response.json()
     if "tokenizer_path" in server_info:
@@ -901,6 +924,7 @@ def run_benchmark_internal(
                             profile_activities=bench_args.profile_activities,
                             profile_stages=bench_args.profile_stages,
                             merge_profiles=bench_args.merge_profiles,
+                            decode_url=bench_args.decode_url,
                         )
                     )
             except Exception as e:
