@@ -325,6 +325,8 @@ class RequestSenderThread(threading.Thread):
         print(f"[RequestSenderThread] Started. batch_size={self.batch_size}, "
               f"send_interval={self.send_interval}s, total_rounds={self.total_rounds}")
 
+        last_send_time = None
+
         while not self._stop_event.is_set():
             # Check if we've reached the total rounds (0 means infinite)
             if self.total_rounds > 0 and self.rounds_completed >= self.total_rounds:
@@ -338,6 +340,13 @@ class RequestSenderThread(threading.Thread):
                     # Send one more round then stop
                     if self.rounds_completed > 0:
                         break
+
+            # Calculate and log interval since last send
+            current_time = time.time()
+            if last_send_time is not None:
+                interval = current_time - last_send_time
+                print(f"[RequestSenderThread] Interval since last send: {interval:.2f}s")
+            last_send_time = current_time
 
             # Sample new payload and send request
             try:
