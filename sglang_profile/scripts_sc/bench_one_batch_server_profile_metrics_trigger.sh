@@ -13,6 +13,7 @@ PROFILE_STEPS=${PROFILE_STEPS:-10}
 PROFILE_TRIGGER_THRESHOLD=${PROFILE_TRIGGER_THRESHOLD:-"0.9"}
 PROFILE_POLLING_INTERVAL=${PROFILE_POLLING_INTERVAL:-"0.1"}
 PROFILE_DELAY_STEPS=${PROFILE_DELAY_STEPS:-"0"}
+PROFILE_LOG_INTERVAL=${PROFILE_LOG_INTERVAL:-"5.0"}
 
 # Continuous sending parameters
 SEND_INTERVAL=${SEND_INTERVAL:-"0.0"}
@@ -76,6 +77,7 @@ Metrics-triggered profiling benchmark
   PROFILE_TRIGGER_THRESHOLD=$PROFILE_TRIGGER_THRESHOLD
   PROFILE_POLLING_INTERVAL=$PROFILE_POLLING_INTERVAL
   PROFILE_DELAY_STEPS=$PROFILE_DELAY_STEPS
+  PROFILE_LOG_INTERVAL=$PROFILE_LOG_INTERVAL
   SEND_INTERVAL=$SEND_INTERVAL
   TOTAL_ROUNDS=$TOTAL_ROUNDS
   WAIT_FOR_PROFILE=$WAIT_FOR_PROFILE
@@ -91,6 +93,7 @@ echo "python $BENCH_SCRIPT \
     --profile-trigger-threshold $PROFILE_TRIGGER_THRESHOLD \
     --profile-polling-interval $PROFILE_POLLING_INTERVAL \
     --profile-delay-steps $PROFILE_DELAY_STEPS \
+    --profile-log-interval $PROFILE_LOG_INTERVAL \
     --send-interval $SEND_INTERVAL \
     --total-rounds $TOTAL_ROUNDS \
     $( [ "$WAIT_FOR_PROFILE" = "1" ] && echo "--wait-for-profile" ) \
@@ -108,6 +111,7 @@ python $BENCH_SCRIPT \
     --profile-trigger-threshold $PROFILE_TRIGGER_THRESHOLD \
     --profile-polling-interval $PROFILE_POLLING_INTERVAL \
     --profile-delay-steps $PROFILE_DELAY_STEPS \
+    --profile-log-interval $PROFILE_LOG_INTERVAL \
     --send-interval $SEND_INTERVAL \
     --total-rounds $TOTAL_ROUNDS \
     $( [ "$WAIT_FOR_PROFILE" = "1" ] && echo "--wait-for-profile" ) \

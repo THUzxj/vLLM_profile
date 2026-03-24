@@ -76,6 +76,7 @@ class ProfileTriggerThread(threading.Thread):
         polling_interval: float = 0.1,
         trigger_threshold: float = 0.9,
         profile_delay_steps: int = 0,
+        log_interval: float = 5.0,
     ):
         super().__init__(daemon=True)
         self.decode_url = decode_url
@@ -90,6 +91,7 @@ class ProfileTriggerThread(threading.Thread):
         self.polling_interval = polling_interval
         self.trigger_threshold = trigger_threshold
         self.profile_delay_steps = profile_delay_steps
+        self.log_interval = log_interval
 
         self._stop_event = threading.Event()
         self.profile_link: Optional[str] = None
@@ -105,16 +107,25 @@ class ProfileTriggerThread(threading.Thread):
         """Main loop: poll metrics and trigger profile when condition is met."""
         trigger_count = int(self.target_batch_size * self.trigger_threshold)
         print(f"[ProfileTriggerThread] Started monitoring. Target: {self.target_batch_size}, "
-              f"Trigger threshold: {trigger_count} ({self.trigger_threshold*100:.0f}%)")
+              f"Trigger threshold: {trigger_count} ({self.trigger_threshold*100:.0f}%), "
+              f"Log interval: {self.log_interval}s")
 
         consecutive_hits = 0
         required_consecutive = 3  # Require 3 consecutive hits to trigger
+        last_log_time = time.time()
 
         while not self._stop_event.is_set():
             running_reqs = get_running_requests(self.decode_url)
 
             if running_reqs is not None:
                 self.running_requests_history.append(running_reqs)
+
+                # Periodic logging
+                current_time = time.time()
+                if current_time - last_log_time >= self.log_interval:
+                    print(f"[ProfileTriggerThread] Running requests: {running_reqs} "
+                          f"(threshold: {trigger_count}, target: {self.target_batch_size})")
+                    last_log_time = current_time
 
                 if running_reqs >= trigger_count:
                     consecutive_hits += 1
@@ -488,6 +499,7 @@ class BenchArgs:
     profile_trigger_threshold: float = 0.9
     profile_polling_interval: float = 0.1
     profile_delay_steps: int = 0
+    profile_log_interval: float = 5.0  # Interval for logging running requests
     # New parameters for continuous request sending
     send_interval: float = 0.0  # Interval between sending batches (seconds)
     total_rounds: int = 1  # Total number of rounds to send batches (0 = infinite until profile done)
@@ -637,6 +649,12 @@ class BenchArgs:
             type=int,
             default=BenchArgs.profile_delay_steps,
             help="Number of polling cycles to wait after trigger threshold before starting profile. Default: 0.",
+        )
+        parser.add_argument(
+            "--profile-log-interval",
+            type=float,
+            default=BenchArgs.profile_log_interval,
+            help="Interval in seconds between logging running requests. Default: 5.0.",
         )
         parser.add_argument(
             "--send-interval",
@@ -1067,6 +1085,7 @@ def run_one_case_with_metrics_trigger(
     profile_trigger_threshold: float = 0.9,
     profile_polling_interval: float = 0.1,
     profile_delay_steps: int = 0,
+    profile_log_interval: float = 5.0,
     # Continuous sending parameters
     send_interval: float = 0.0,
     total_rounds: int = 0,
@@ -1137,6 +1156,7 @@ def run_one_case_with_metrics_trigger(
         polling_interval=profile_polling_interval,
         trigger_threshold=profile_trigger_threshold,
         profile_delay_steps=profile_delay_steps,
+        log_interval=profile_log_interval,
     )
 
     # Create request sender thread
@@ -1520,6 +1540,7 @@ def run_benchmark_internal(
                             profile_trigger_threshold=bench_args.profile_trigger_threshold,
                             profile_polling_interval=bench_args.profile_polling_interval,
                             profile_delay_steps=bench_args.profile_delay_steps,
+                            profile_log_interval=bench_args.profile_log_interval,
                             send_interval=bench_args.send_interval,
                             total_rounds=bench_args.total_rounds,
                             wait_for_profile=bench_args.wait_for_profile,
