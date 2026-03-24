@@ -1,4 +1,5 @@
 import argparse
+import concurrent.futures
 import dataclasses
 import itertools
 import json
@@ -185,6 +186,7 @@ class RequestSenderThread(threading.Thread):
     """
     A background thread that continuously sends requests with newly sampled payloads.
     This is decoupled from the profile trigger thread.
+    Requests are sent asynchronously - doesn't wait for response before sending next.
     """
 
     def __init__(
@@ -200,7 +202,7 @@ class RequestSenderThread(threading.Thread):
         dataset_name: str = "random",
         dataset_path: str = "",
         parallel_batch: bool = False,
-        send_interval: float = 0.0,
+        send_interval: float = 5.0,
         total_rounds: int = 0,
         wait_for_profile: bool = True,
         profile_trigger_thread: Optional[ProfileTriggerThread] = None,
@@ -227,6 +229,8 @@ class RequestSenderThread(threading.Thread):
         self.total_requests_sent = 0
         self.errors: List[str] = []
         self.latencies: List[float] = []
+        self._pending_futures: List[concurrent.futures.Future] = []
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=16)
 
     def stop(self):
         """Signal the thread to stop."""
@@ -320,8 +324,17 @@ class RequestSenderThread(threading.Thread):
             self.errors.append(str(e))
             return -1.0
 
+    def _on_request_complete(self, future: concurrent.futures.Future):
+        """Callback when a request completes."""
+        try:
+            latency = future.result()
+            if latency > 0:
+                self.latencies.append(latency)
+        except Exception as e:
+            self.errors.append(str(e))
+
     def run(self):
-        """Main loop: send requests at specified intervals."""
+        """Main loop: send requests asynchronously at specified intervals."""
         print(f"[RequestSenderThread] Started. batch_size={self.batch_size}, "
               f"send_interval={self.send_interval}s, total_rounds={self.total_rounds}")
 
@@ -348,16 +361,18 @@ class RequestSenderThread(threading.Thread):
                 print(f"[RequestSenderThread] Interval since last send: {interval:.2f}s")
             last_send_time = current_time
 
-            # Sample new payload and send request
+            # Sample new payload and send request asynchronously
             try:
                 payload = self._sample_payload()
-                latency = self._send_request(payload)
+                # Submit to thread pool - doesn't block
+                future = self._executor.submit(self._send_request, payload)
+                future.add_done_callback(self._on_request_complete)
+                self._pending_futures.append(future)
+
                 self.rounds_completed += 1
                 self.total_requests_sent += self.batch_size
-                if latency > 0:
-                    self.latencies.append(latency)
                 print(f"[RequestSenderThread] Round {self.rounds_completed}: "
-                      f"sent {self.batch_size} requests, latency={latency:.2f}s")
+                      f"sent {self.batch_size} requests (async)")
             except Exception as e:
                 self.errors.append(f"Error in round {self.rounds_completed}: {e}")
                 print(f"[RequestSenderThread] Error in round {self.rounds_completed}: {e}")
@@ -366,8 +381,13 @@ class RequestSenderThread(threading.Thread):
             if self.send_interval > 0:
                 time.sleep(self.send_interval)
 
+        # Wait for all pending requests to complete
+        print(f"[RequestSenderThread] Waiting for {len(self._pending_futures)} pending requests...")
+        concurrent.futures.wait(self._pending_futures, timeout=DEFAULT_TIMEOUT)
+
         print(f"[RequestSenderThread] Stopped. Total rounds: {self.rounds_completed}, "
-              f"total requests: {self.total_requests_sent}, errors: {len(self.errors)}")
+              f"total requests: {self.total_requests_sent}, errors: {len(self.errors)}, "
+              f"completed latencies: {len(self.latencies)}")
 
     def get_stats(self) -> dict:
         """Get statistics about the requests sent."""
@@ -516,7 +536,7 @@ class BenchArgs:
     profile_delay_steps: int = 0
     profile_log_interval: float = 5.0  # Interval for logging running requests
     # New parameters for continuous request sending
-    send_interval: float = 0.0  # Interval between sending batches (seconds)
+    send_interval: float = 5.0  # Interval between sending batches (seconds)
     total_rounds: int = 1  # Total number of rounds to send batches (0 = infinite until profile done)
     wait_for_profile: bool = True  # Whether to wait for profile to complete before stopping
 
@@ -1103,7 +1123,7 @@ def run_one_case_with_metrics_trigger(
     profile_log_interval: float = 5.0,
     dp_size: int = 1,
     # Continuous sending parameters
-    send_interval: float = 0.0,
+    send_interval: float = 5.0,
     total_rounds: int = 0,
     wait_for_profile: bool = True,
     # Timeout for the entire operation
