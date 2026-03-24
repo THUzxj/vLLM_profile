@@ -67,7 +67,7 @@ mkdir -p "$SGLANG_TORCH_PROFILER_DIR"
 BASE_PORT=${BASE_PORT:-30000}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BENCH_SCRIPT="${SCRIPT_DIR}/../bench_one_batch_server_internal_profile_max_batch_058.py"
+BENCH_SCRIPT="${SCRIPT_DIR}/../bench_one_batch_server_profile_max_batch_058.py"
 
 echo "================================================================================
 Metrics-triggered profiling benchmark
