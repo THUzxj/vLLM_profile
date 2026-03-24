@@ -334,11 +334,13 @@ class RequestSenderThread(threading.Thread):
             self.errors.append(str(e))
 
     def run(self):
-        """Main loop: send requests asynchronously at specified intervals."""
+        """Main loop: send requests asynchronously at fixed intervals."""
         print(f"[RequestSenderThread] Started. batch_size={self.batch_size}, "
               f"send_interval={self.send_interval}s, total_rounds={self.total_rounds}")
 
         last_send_time = None
+        # Track next scheduled send time for fixed interval
+        next_send_time = time.time()
 
         while not self._stop_event.is_set():
             # Check if we've reached the total rounds (0 means infinite)
@@ -377,9 +379,13 @@ class RequestSenderThread(threading.Thread):
                 self.errors.append(f"Error in round {self.rounds_completed}: {e}")
                 print(f"[RequestSenderThread] Error in round {self.rounds_completed}: {e}")
 
-            # Wait for the specified interval before sending the next batch
-            if self.send_interval > 0:
-                time.sleep(self.send_interval)
+            # Calculate exact wait time for fixed interval
+            next_send_time += self.send_interval
+            now = time.time()
+            wait_time = next_send_time - now
+            if wait_time > 0:
+                time.sleep(wait_time)
+            # If wait_time <= 0, we're behind schedule - send immediately
 
         # Wait for all pending requests to complete
         print(f"[RequestSenderThread] Waiting for {len(self._pending_futures)} pending requests...")
