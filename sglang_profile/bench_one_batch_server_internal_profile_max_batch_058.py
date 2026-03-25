@@ -57,6 +57,87 @@ def get_running_requests(url: str) -> Optional[int]:
         return None
 
 
+def get_running_requests_by_rank(url: str, dp_rank: int = 0) -> Optional[int]:
+    """
+    Get running requests for a specific DP rank from Prometheus /metrics endpoint.
+
+    Args:
+        url: Server URL
+        dp_rank: DP rank to query (default: 0)
+
+    Returns:
+        Number of running requests for the specified rank, or None if not found.
+    """
+    try:
+        response = requests.get(url + "/metrics", timeout=5)
+        response.raise_for_status()
+
+        for line in response.text.split("\n"):
+            if line.startswith("sglang:num_running_reqs"):
+                # Parse: sglang:num_running_reqs{dp_rank="0",tp_rank="0",...} 128
+                match = re.match(
+                    r'sgang:num_running_reqs\{([^}]*)\}\s+([\d.eE+-]+)',
+                    line
+                )
+                if match:
+                    labels_str = match.group(1)
+                    value = int(float(match.group(2)))
+
+                    # Parse labels
+                    labels = {}
+                    for label in labels_str.split(','):
+                        if '=' in label:
+                            k, v = label.split('=')
+                            labels[k.strip()] = v.strip('"')
+
+                    # Check if dp_rank matches
+                    if int(labels.get('dp_rank', 0)) == dp_rank:
+                        return value, labels
+
+        return None, None
+    except Exception as e:
+        print(f"Warning: Failed to get running requests from metrics: {e}")
+        return None, None
+
+
+def get_all_running_requests_by_rank(url: str) -> dict:
+    """
+    Get running requests for all DP ranks from Prometheus /metrics endpoint.
+
+    Returns:
+        Dict mapping dp_rank to (value, labels) tuple
+    """
+    try:
+        response = requests.get(url + "/metrics", timeout=5)
+        response.raise_for_status()
+
+        results = {}
+        for line in response.text.split("\n"):
+            if line.startswith("sglang:num_running_reqs"):
+                match = re.match(
+                    r'sgang:num_running_reqs\{([^}]*)\}\s+([\d.eE+-]+)',
+                    line
+                )
+                if match:
+                    labels_str = match.group(1)
+                    value = int(float(match.group(2)))
+
+                    # Parse labels
+                    labels = {}
+                    for label in labels_str.split(','):
+                        if '=' in label:
+                            k, v = label.split('=')
+                            labels[k.strip()] = v.strip('"')
+
+                    dp_rank = int(labels.get('dp_rank', 0))
+                    results[dp_rank] = (value, labels)
+
+        return results
+    except Exception as e:
+        print(f"Warning: Failed to get running requests from metrics: {e}")
+        return {}
+
+
 def update_max_running_requests(url: str, new_value: int, max_retries: int = 30, retry_interval: float = 1.0) -> bool:
     """
     Update the server's max_running_requests at runtime.
@@ -150,6 +231,7 @@ class ProfileTriggerThread(threading.Thread):
         profile_delay_steps: int = 0,
         log_interval: float = 5.0,
         dp_size: int = 1,
+        target_dp_rank: int = 0,
     ):
         super().__init__(daemon=True)
         self.decode_url = decode_url
@@ -166,6 +248,7 @@ class ProfileTriggerThread(threading.Thread):
         self.profile_delay_steps = profile_delay_steps
         self.log_interval = log_interval
         self.dp_size = dp_size
+        self.target_dp_rank = target_dp_rank
 
         self._stop_event = threading.Event()
         self.profile_link: Optional[str] = None
@@ -184,32 +267,34 @@ class ProfileTriggerThread(threading.Thread):
         trigger_count = int(target_per_dp * self.trigger_threshold)
         print(f"[ProfileTriggerThread] Started monitoring. Target: {self.target_batch_size} "
               f"(per DP: {target_per_dp}), Trigger threshold: {trigger_count} ({self.trigger_threshold*100:.0f}%), "
-              f"DP size: {self.dp_size}, Log interval: {self.log_interval}s")
+              f"DP size: {self.dp_size}, Target DP rank: {self.target_dp_rank}, Log interval: {self.log_interval}s")
 
         consecutive_hits = 0
         required_consecutive = 3  # Require 3 consecutive hits to trigger
         last_log_time = time.time()
 
         while not self._stop_event.is_set():
-            running_reqs = get_running_requests(self.decode_url)
+            # Get running requests for target DP rank
+            running_reqs, labels = get_running_requests_by_rank(self.decode_url, self.target_dp_rank)
 
             if running_reqs is not None:
                 self.running_requests_history.append(running_reqs)
 
-                # Periodic logging
+                # Periodic logging with rank info
                 current_time = time.time()
                 if current_time - last_log_time >= self.log_interval:
+                    label_str = ", ".join([f"{k}={v}" for k, v in (labels or {}).items()])
                     print(f"[ProfileTriggerThread] Running requests: {running_reqs} "
-                          f"(threshold: {trigger_count}, target_per_dp: {target_per_dp}, "
-                          f"total_target: {self.target_batch_size}, dp_size: {self.dp_size})")
+                          f"(rank: {{{label_str}}}, threshold: {trigger_count}, target_per_dp: {target_per_dp})")
                     last_log_time = current_time
 
                 if running_reqs >= trigger_count:
                     consecutive_hits += 1
                     if consecutive_hits >= required_consecutive and not self.profile_started:
+                        label_str = ", ".join([f"{k}={v}" for k, v in (labels or {}).items()])
                         print(f"[ProfileTriggerThread] Running requests ({running_reqs}) >= "
                               f"threshold ({trigger_count}) for {consecutive_hits} times. "
-                              f"Starting profile (dp_size={self.dp_size})...")
+                              f"Starting profile (rank: {{{label_str}}})...")
 
                         # Add optional delay before profiling
                         if self.profile_delay_steps > 0:
@@ -619,6 +704,7 @@ class BenchArgs:
     # Update max_running_requests before profiling
     update_max_running_reqs: bool = True
     max_running_reqs_update_retries: int = 30
+    target_dp_rank: int = 0  # DP rank to monitor for running requests
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -806,6 +892,12 @@ class BenchArgs:
             type=int,
             default=BenchArgs.max_running_reqs_update_retries,
             help="Max retries for updating max_running_requests. Default: 30.",
+        )
+        parser.add_argument(
+            "--target-dp-rank",
+            type=int,
+            default=BenchArgs.target_dp_rank,
+            help="DP rank to monitor for running requests. Default: 0.",
         )
 
     @classmethod
@@ -1220,6 +1312,7 @@ def run_one_case_with_metrics_trigger(
     profile_delay_steps: int = 0,
     profile_log_interval: float = 5.0,
     dp_size: int = 1,
+    target_dp_rank: int = 0,
     # Continuous sending parameters
     send_interval: float = 5.0,
     total_rounds: int = 0,
@@ -1292,9 +1385,10 @@ def run_one_case_with_metrics_trigger(
         print(f"[run_one_case_with_metrics_trigger] Waiting for server to be idle...")
         idle_wait_start = time.time()
         while time.time() - idle_wait_start < timeout:
-            running_reqs = get_running_requests(effective_decode_url)
+            running_reqs, labels = get_running_requests_by_rank(effective_decode_url, target_dp_rank)
             if running_reqs is not None and running_reqs == 0:
-                print(f"[run_one_case_with_metrics_trigger] Server is idle (running_reqs=0)")
+                label_str = ", ".join([f"{k}={v}" for k, v in (labels or {}).items()])
+                print(f"[run_one_case_with_metrics_trigger] Server is idle (running_reqs=0, rank: {{{label_str}}})")
                 break
             time.sleep(0.5)
         else:
@@ -1330,6 +1424,7 @@ def run_one_case_with_metrics_trigger(
         profile_delay_steps=profile_delay_steps,
         log_interval=profile_log_interval,
         dp_size=dp_size,
+        target_dp_rank=target_dp_rank,
     )
 
     # Create request sender thread
@@ -1715,6 +1810,7 @@ def run_benchmark_internal(
                             profile_delay_steps=bench_args.profile_delay_steps,
                             profile_log_interval=bench_args.profile_log_interval,
                             dp_size=server_args.dp_size,
+                            target_dp_rank=bench_args.target_dp_rank,
                             send_interval=bench_args.send_interval,
                             total_rounds=bench_args.total_rounds,
                             wait_for_profile=bench_args.wait_for_profile,
