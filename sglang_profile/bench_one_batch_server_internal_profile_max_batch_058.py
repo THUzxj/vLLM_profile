@@ -98,9 +98,10 @@ def get_running_requests_by_rank(url: str, dp_rank: int = 0, timeout: int = 60) 
                     if int(labels.get('dp_rank', 0)) == dp_rank:
                         return value, labels
 
+        print(f"[metrics] No running requests found for dp_rank={dp_rank}")
         return None, None
     except Exception as e:
-        print(f"Warning: Failed to get running requests from metrics: {e}")
+        print(f"[metrics] Failed to get running requests: {e}")
         return None, None
 
 
@@ -143,9 +144,11 @@ def get_all_running_requests_by_rank(url: str, timeout: int = 60) -> dict:
                     dp_rank = int(labels.get('dp_rank', 0))
                     results[dp_rank] = (value, labels)
 
+        if not results:
+            print(f"[metrics] No running requests found in metrics")
         return results
     except Exception as e:
-        print(f"Warning: Failed to get running requests from metrics: {e}")
+        print(f"[metrics] Failed to get running requests: {e}")
         return {}
 
 
