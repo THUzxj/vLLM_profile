@@ -278,11 +278,10 @@ class ProfileTriggerThread(threading.Thread):
         trigger_count = int(target_per_dp * self.trigger_threshold)
         print(f"[ProfileTriggerThread] Started monitoring. Target: {self.target_batch_size} "
               f"(per DP: {target_per_dp}), Trigger threshold: {trigger_count} ({self.trigger_threshold*100:.0f}%), "
-              f"DP size: {self.dp_size}, Target DP rank: {self.target_dp_rank}, Log interval: {self.log_interval}s")
+              f"DP size: {self.dp_size}, Target DP rank: {self.target_dp_rank}")
 
         consecutive_hits = 0
         required_consecutive = 3  # Require 3 consecutive hits to trigger
-        last_log_time = time.time()
 
         while not self._stop_event.is_set():
             # Get running requests for target DP rank
@@ -291,13 +290,10 @@ class ProfileTriggerThread(threading.Thread):
             if running_reqs is not None:
                 self.running_requests_history.append(running_reqs)
 
-                # Periodic logging with rank info
-                current_time = time.time()
-                if current_time - last_log_time >= self.log_interval:
-                    label_str = ", ".join([f"{k}={v}" for k, v in (labels or {}).items()])
-                    print(f"[ProfileTriggerThread] Running requests: {running_reqs} "
-                          f"(rank: {{{label_str}}}, threshold: {trigger_count}, target_per_dp: {target_per_dp})")
-                    last_log_time = current_time
+                # Log running requests on every poll
+                label_str = ", ".join([f"{k}={v}" for k, v in (labels or {}).items()])
+                print(f"[ProfileTriggerThread] Running requests: {running_reqs} "
+                      f"(rank: {{{label_str}}}, threshold: {trigger_count})")
 
                 if running_reqs >= trigger_count:
                     consecutive_hits += 1
