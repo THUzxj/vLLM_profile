@@ -80,7 +80,7 @@ def get_running_requests_by_rank(url: str, dp_rank: int = 0, timeout: int = 60) 
             if line.startswith("sglang:num_running_reqs"):
                 # Parse: sglang:num_running_reqs{dp_rank="0",tp_rank="0",...} 128
                 match = re.match(
-                    r'sgang:num_running_reqs\{([^}]*)\}\s+([\d.eE+-]+)',
+                    r'sglang:num_running_reqs\{([^}]*)\}\s+([\d.eE+-]+)',
                     line
                 )
                 if match:
@@ -127,7 +127,7 @@ def get_all_running_requests_by_rank(url: str, timeout: int = 60) -> dict:
         for line in response.text.split("\n"):
             if line.startswith("sglang:num_running_reqs"):
                 match = re.match(
-                    r'sgang:num_running_reqs\{([^}]*)\}\s+([\d.eE+-]+)',
+                    r'sglang:num_running_reqs\{([^}]*)\}\s+([\d.eE+-]+)',
                     line
                 )
                 if match:
