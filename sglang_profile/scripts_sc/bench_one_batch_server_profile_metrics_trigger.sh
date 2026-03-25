@@ -105,7 +105,7 @@ echo "python $BENCH_SCRIPT \
     --send-interval $SEND_INTERVAL \
     --total-rounds $TOTAL_ROUNDS \
     $( [ "$WAIT_FOR_PROFILE" = "1" ] && echo "--wait-for-profile" ) \
-    $( [ "$UPDATE_MAX_RUNNING_REQS" = "1" ] && echo "--update-max-running-reqs" ) \
+    $( [ "$UPDATE_MAX_RUNNING_REQS" = "1" ] && echo "--update-max-running-reqs" || echo "--no-update-max-running-reqs" ) \
     --max-running-reqs-update-retries $MAX_RUNNING_REQS_UPDATE_RETRIES \
     --target-dp-rank $TARGET_DP_RANK \
     $DECODE_URL_ARG $PREFILL_URL_ARG \
@@ -126,7 +126,7 @@ python $BENCH_SCRIPT \
     --send-interval $SEND_INTERVAL \
     --total-rounds $TOTAL_ROUNDS \
     $( [ "$WAIT_FOR_PROFILE" = "1" ] && echo "--wait-for-profile" ) \
-    $( [ "$UPDATE_MAX_RUNNING_REQS" = "1" ] && echo "--update-max-running-reqs" ) \
+    $( [ "$UPDATE_MAX_RUNNING_REQS" = "1" ] && echo "--update-max-running-reqs" || echo "--no-update-max-running-reqs" ) \
     --max-running-reqs-update-retries $MAX_RUNNING_REQS_UPDATE_RETRIES \
     --target-dp-rank $TARGET_DP_RANK \
     $DECODE_URL_ARG $PREFILL_URL_ARG \
