@@ -482,12 +482,16 @@ class RequestSenderThread(threading.Thread):
                         break
                     data = json.loads(chunk[5:].strip("\n"))
                     if "error" in data:
-                        self.errors.append(f"Request error: {data}")
+                        error_msg = f"Request error: {data}"
+                        self.errors.append(error_msg)
+                        print(f"[RequestSenderThread] {error_msg}")
 
             latency = time.perf_counter() - tic
             return latency
         except Exception as e:
-            self.errors.append(str(e))
+            error_msg = f"Request exception: {e}"
+            self.errors.append(error_msg)
+            print(f"[RequestSenderThread] {error_msg}")
             return -1.0
 
     def _on_request_complete(self, future: concurrent.futures.Future):
@@ -497,7 +501,9 @@ class RequestSenderThread(threading.Thread):
             if latency > 0:
                 self.latencies.append(latency)
         except Exception as e:
-            self.errors.append(str(e))
+            error_msg = f"Request callback error: {e}"
+            self.errors.append(error_msg)
+            print(f"[RequestSenderThread] {error_msg}")
 
     def run(self):
         """Main loop: send requests asynchronously at fixed intervals."""
