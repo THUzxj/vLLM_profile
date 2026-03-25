@@ -57,19 +57,23 @@ def get_running_requests(url: str) -> Optional[int]:
         return None
 
 
-def get_running_requests_by_rank(url: str, dp_rank: int = 0) -> Optional[int]:
+def get_running_requests_by_rank(url: str, dp_rank: int = 0, timeout: int = 60) -> Optional[int]:
     """
     Get running requests for a specific DP rank from Prometheus /metrics endpoint.
 
     Args:
         url: Server URL
         dp_rank: DP rank to query (default: 0)
+        timeout: Request timeout in seconds (default: 60)
 
     Returns:
         Number of running requests for the specified rank, or None if not found.
     """
     try:
-        response = requests.get(url + "/metrics", timeout=5)
+        start_time = time.time()
+        response = requests.get(url + "/metrics", timeout=timeout)
+        elapsed = time.time() - start_time
+        print(f"[metrics] GET /metrics took {elapsed:.2f}s")
         response.raise_for_status()
 
         for line in response.text.split("\n"):
@@ -100,15 +104,22 @@ def get_running_requests_by_rank(url: str, dp_rank: int = 0) -> Optional[int]:
         return None, None
 
 
-def get_all_running_requests_by_rank(url: str) -> dict:
+def get_all_running_requests_by_rank(url: str, timeout: int = 60) -> dict:
     """
     Get running requests for all DP ranks from Prometheus /metrics endpoint.
+
+    Args:
+        url: Server URL
+        timeout: Request timeout in seconds (default: 60)
 
     Returns:
         Dict mapping dp_rank to (value, labels) tuple
     """
     try:
-        response = requests.get(url + "/metrics", timeout=5)
+        start_time = time.time()
+        response = requests.get(url + "/metrics", timeout=timeout)
+        elapsed = time.time() - start_time
+        print(f"[metrics] GET /metrics took {elapsed:.2f}s")
         response.raise_for_status()
 
         results = {}
