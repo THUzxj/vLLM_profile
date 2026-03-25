@@ -20,6 +20,10 @@ SEND_INTERVAL=${SEND_INTERVAL:-"5.0"}
 TOTAL_ROUNDS=${TOTAL_ROUNDS:-"0"}  # 0 means infinite until profile done
 WAIT_FOR_PROFILE=${WAIT_FOR_PROFILE:-"1"}
 
+# Update max_running_requests before profiling
+UPDATE_MAX_RUNNING_REQS=${UPDATE_MAX_RUNNING_REQS:-"1"}
+MAX_RUNNING_REQS_UPDATE_RETRIES=${MAX_RUNNING_REQS_UPDATE_RETRIES:-"30"}
+
 # PD disaggregation URLs (optional)
 DECODE_URL=${DECODE_URL:-""}
 PREFILL_URL=${PREFILL_URL:-""}
@@ -81,6 +85,8 @@ Metrics-triggered profiling benchmark
   SEND_INTERVAL=$SEND_INTERVAL
   TOTAL_ROUNDS=$TOTAL_ROUNDS
   WAIT_FOR_PROFILE=$WAIT_FOR_PROFILE
+  UPDATE_MAX_RUNNING_REQS=$UPDATE_MAX_RUNNING_REQS
+  MAX_RUNNING_REQS_UPDATE_RETRIES=$MAX_RUNNING_REQS_UPDATE_RETRIES
   DECODE_URL=$DECODE_URL
   PREFILL_URL=$PREFILL_URL
 ================================================================================"
@@ -97,6 +103,8 @@ echo "python $BENCH_SCRIPT \
     --send-interval $SEND_INTERVAL \
     --total-rounds $TOTAL_ROUNDS \
     $( [ "$WAIT_FOR_PROFILE" = "1" ] && echo "--wait-for-profile" ) \
+    $( [ "$UPDATE_MAX_RUNNING_REQS" = "1" ] && echo "--update-max-running-reqs" ) \
+    --max-running-reqs-update-retries $MAX_RUNNING_REQS_UPDATE_RETRIES \
     $DECODE_URL_ARG $PREFILL_URL_ARG \
     --result-filename $RESULT_DIR/result.jsonl \
     --dataset-path \"../sharegpt_data/ShareGPT_V3_unfiltered_cleaned_split.json\" \
@@ -115,6 +123,8 @@ python $BENCH_SCRIPT \
     --send-interval $SEND_INTERVAL \
     --total-rounds $TOTAL_ROUNDS \
     $( [ "$WAIT_FOR_PROFILE" = "1" ] && echo "--wait-for-profile" ) \
+    $( [ "$UPDATE_MAX_RUNNING_REQS" = "1" ] && echo "--update-max-running-reqs" ) \
+    --max-running-reqs-update-retries $MAX_RUNNING_REQS_UPDATE_RETRIES \
     $DECODE_URL_ARG $PREFILL_URL_ARG \
     --result-filename $RESULT_DIR/result.jsonl \
     --dataset-path "../sharegpt_data/ShareGPT_V3_unfiltered_cleaned_split.json" \

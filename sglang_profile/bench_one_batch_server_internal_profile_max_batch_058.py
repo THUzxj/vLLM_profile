@@ -141,8 +141,6 @@ class ProfileTriggerThread(threading.Thread):
         profile_delay_steps: int = 0,
         log_interval: float = 5.0,
         dp_size: int = 1,
-        update_max_running_reqs: bool = False,
-        max_running_reqs_update_retries: int = 30,
     ):
         super().__init__(daemon=True)
         self.decode_url = decode_url
@@ -159,8 +157,6 @@ class ProfileTriggerThread(threading.Thread):
         self.profile_delay_steps = profile_delay_steps
         self.log_interval = log_interval
         self.dp_size = dp_size
-        self.update_max_running_reqs = update_max_running_reqs
-        self.max_running_reqs_update_retries = max_running_reqs_update_retries
 
         self._stop_event = threading.Event()
         self.profile_link: Optional[str] = None
@@ -611,6 +607,9 @@ class BenchArgs:
     send_interval: float = 5.0  # Interval between sending batches (seconds)
     total_rounds: int = 1  # Total number of rounds to send batches (0 = infinite until profile done)
     wait_for_profile: bool = True  # Whether to wait for profile to complete before stopping
+    # Update max_running_requests before profiling
+    update_max_running_reqs: bool = True
+    max_running_reqs_update_retries: int = 30
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -780,6 +779,24 @@ class BenchArgs:
             action="store_true",
             default=BenchArgs.wait_for_profile,
             help="Wait for profile to complete before stopping request sender. Default: True.",
+        )
+        parser.add_argument(
+            "--update-max-running-reqs",
+            action="store_true",
+            default=BenchArgs.update_max_running_reqs,
+            help="Update max_running_requests to batch_size before profiling. Default: True.",
+        )
+        parser.add_argument(
+            "--no-update-max-running-reqs",
+            action="store_false",
+            dest="update_max_running_reqs",
+            help="Do not update max_running_requests before profiling.",
+        )
+        parser.add_argument(
+            "--max-running-reqs-update-retries",
+            type=int,
+            default=BenchArgs.max_running_reqs_update_retries,
+            help="Max retries for updating max_running_requests. Default: 30.",
         )
 
     @classmethod
@@ -1198,6 +1215,9 @@ def run_one_case_with_metrics_trigger(
     send_interval: float = 5.0,
     total_rounds: int = 0,
     wait_for_profile: bool = True,
+    # Update max_running_requests parameter
+    update_max_running_reqs: bool = True,
+    max_running_reqs_update_retries: int = 30,
     # Timeout for the entire operation
     timeout: float = 600.0,
 ):
@@ -1237,6 +1257,8 @@ def run_one_case_with_metrics_trigger(
         send_interval: Interval between sending batches
         total_rounds: Total rounds to send (0 = infinite until profile done)
         wait_for_profile: Whether to wait for profile to complete
+        update_max_running_reqs: Whether to update max_running_requests to batch_size before profiling
+        max_running_reqs_update_retries: Max retries for updating max_running_requests
         timeout: Timeout for the entire operation
     """
     response = requests.post(url + "/flush_cache", timeout=DEFAULT_TIMEOUT)
@@ -1249,6 +1271,39 @@ def run_one_case_with_metrics_trigger(
     print(f"  batch_size={batch_size}, input_len={input_len}, output_len={output_len}")
     print(f"  profile_trigger_threshold={profile_trigger_threshold}")
     print(f"  send_interval={send_interval}s, total_rounds={total_rounds}")
+    print(f"  dp_size={dp_size}, update_max_running_reqs={update_max_running_reqs}")
+
+    # Update max_running_requests before starting if enabled
+    if update_max_running_reqs:
+        # Calculate per-DP max_running_requests
+        new_max_running_reqs = batch_size // dp_size
+        print(f"[run_one_case_with_metrics_trigger] Updating max_running_requests to {new_max_running_reqs} (per DP)")
+
+        # Wait for server to be idle before updating
+        print(f"[run_one_case_with_metrics_trigger] Waiting for server to be idle...")
+        idle_wait_start = time.time()
+        while time.time() - idle_wait_start < timeout:
+            running_reqs = get_running_requests(effective_decode_url)
+            if running_reqs is not None and running_reqs == 0:
+                print(f"[run_one_case_with_metrics_trigger] Server is idle (running_reqs=0)")
+                break
+            time.sleep(0.5)
+        else:
+            print(f"[run_one_case_with_metrics_trigger] Warning: Timeout waiting for idle server")
+
+        # Update max_running_requests
+        success = update_max_running_requests(
+            effective_decode_url,
+            new_max_running_reqs,
+            max_retries=max_running_reqs_update_retries,
+            retry_interval=1.0,
+        )
+        if not success:
+            print(f"[run_one_case_with_metrics_trigger] Warning: Failed to update max_running_requests, continuing anyway")
+        else:
+            # Verify the update
+            current_max = get_max_running_requests_from_server(effective_decode_url)
+            print(f"[run_one_case_with_metrics_trigger] Verified max_running_requests={current_max}")
 
     # Create profile trigger thread
     profile_trigger_thread = ProfileTriggerThread(
@@ -1654,6 +1709,8 @@ def run_benchmark_internal(
                             send_interval=bench_args.send_interval,
                             total_rounds=bench_args.total_rounds,
                             wait_for_profile=bench_args.wait_for_profile,
+                            update_max_running_reqs=bench_args.update_max_running_reqs,
+                            max_running_reqs_update_retries=bench_args.max_running_reqs_update_retries,
                         )
                     )
             except Exception as e:
