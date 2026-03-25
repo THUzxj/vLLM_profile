@@ -57,6 +57,68 @@ def get_running_requests(url: str) -> Optional[int]:
         return None
 
 
+def update_max_running_requests(url: str, new_value: int, max_retries: int = 30, retry_interval: float = 1.0) -> bool:
+    """
+    Update the server's max_running_requests at runtime.
+    Requires no active requests in the server.
+
+    Args:
+        url: Server URL
+        new_value: New max_running_requests value
+        max_retries: Maximum number of retries if update fails
+        retry_interval: Interval between retries in seconds
+
+    Returns:
+        True if update succeeded, False otherwise
+    """
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                url + "/set_internal_state",
+                json={"server_args": {"max_running_requests": new_value}},
+                timeout=10,
+            )
+            result = response.json()
+
+            if result.get("updated", False):
+                print(f"[update_max_running_requests] Successfully updated to {new_value}")
+                return True
+            else:
+                if attempt < max_retries - 1:
+                    print(f"[update_max_running_requests] Attempt {attempt + 1}/{max_retries} failed, "
+                          f"retrying in {retry_interval}s...")
+                    time.sleep(retry_interval)
+                else:
+                    print(f"[update_max_running_requests] Failed after {max_retries} attempts")
+                    return False
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"[update_max_running_requests] Error: {e}, retrying in {retry_interval}s...")
+                time.sleep(retry_interval)
+            else:
+                print(f"[update_max_running_requests] Failed after {max_retries} attempts: {e}")
+                return False
+
+    return False
+
+
+def get_max_running_requests_from_server(url: str) -> Optional[int]:
+    """
+    Get the current max_running_requests from server info.
+    """
+    try:
+        response = requests.get(url + "/get_server_info", timeout=10)
+        response.raise_for_status()
+        server_info = response.json()
+        internal_state = server_info.get("internal_states", [{}])
+        if internal_state:
+            return internal_state[0].get("effective_max_running_requests_per_dp")
+        return None
+    except Exception as e:
+        print(f"Warning: Failed to get max_running_requests from server: {e}")
+        return None
+
+
 class ProfileTriggerThread(threading.Thread):
     """
     A background thread that monitors running requests and triggers profiling
@@ -79,6 +141,8 @@ class ProfileTriggerThread(threading.Thread):
         profile_delay_steps: int = 0,
         log_interval: float = 5.0,
         dp_size: int = 1,
+        update_max_running_reqs: bool = False,
+        max_running_reqs_update_retries: int = 30,
     ):
         super().__init__(daemon=True)
         self.decode_url = decode_url
@@ -95,6 +159,8 @@ class ProfileTriggerThread(threading.Thread):
         self.profile_delay_steps = profile_delay_steps
         self.log_interval = log_interval
         self.dp_size = dp_size
+        self.update_max_running_reqs = update_max_running_reqs
+        self.max_running_reqs_update_retries = max_running_reqs_update_retries
 
         self._stop_event = threading.Event()
         self.profile_link: Optional[str] = None
