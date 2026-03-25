@@ -80,16 +80,25 @@ def update_max_running_requests(url: str, new_value: int, max_retries: int = 30,
             )
             result = response.json()
 
-            if result.get("updated", False):
+            # /set_internal_state returns List[bool] (one per DP rank)
+            # All should be True for success
+            if isinstance(result, list):
+                success = all(result)
+            elif isinstance(result, dict):
+                success = result.get("updated", False)
+            else:
+                success = False
+
+            if success:
                 print(f"[update_max_running_requests] Successfully updated to {new_value}")
                 return True
             else:
                 if attempt < max_retries - 1:
-                    print(f"[update_max_running_requests] Attempt {attempt + 1}/{max_retries} failed, "
+                    print(f"[update_max_running_requests] Attempt {attempt + 1}/{max_retries} failed (result={result}), "
                           f"retrying in {retry_interval}s...")
                     time.sleep(retry_interval)
                 else:
-                    print(f"[update_max_running_requests] Failed after {max_retries} attempts")
+                    print(f"[update_max_running_requests] Failed after {max_retries} attempts (result={result})")
                     return False
         except Exception as e:
             if attempt < max_retries - 1:
