@@ -201,6 +201,31 @@ $PYTHON_CMD "${SCRIPT_DIR}/aggregate_analysis.py" \
 echo ""
 
 # =============================================================================
+# Step 3: Generate component time visualization
+# =============================================================================
+echo -e "${BLUE}================================================================================${NC}"
+echo -e "${BLUE}Step 3: Generating Component Time Visualization${NC}"
+echo -e "${BLUE}================================================================================${NC}"
+echo ""
+
+COMPONENT_PLOTS_DIR="${TRACE_DIR}/component_plots"
+
+# Clean up previous plots
+if [ -d "$COMPONENT_PLOTS_DIR" ]; then
+    echo -e "${YELLOW}Removing previous plots...${NC}"
+    rm -rf "$COMPONENT_PLOTS_DIR"
+fi
+
+mkdir -p "$COMPONENT_PLOTS_DIR"
+
+# Run component time analysis
+$PYTHON_CMD "${SCRIPT_DIR}/analyze_rank_component_time.py" \
+    "$ANALYSIS_DIR" \
+    "$COMPONENT_PLOTS_DIR"
+
+echo ""
+
+# =============================================================================
 # Summary
 # =============================================================================
 echo -e "${GREEN}================================================================================${NC}"
@@ -215,6 +240,9 @@ echo "  2. Aggregated results:   $AGGREGATED_DIR"
 echo "     - aggregated_stats_per_layer.csv  (per-layer statistics)"
 echo "     - aggregated_stats_averaged.csv   (averaged across layers)"
 echo "     - aggregation_summary.txt         (human-readable summary)"
+echo ""
+echo "  3. Component plots:      $COMPONENT_PLOTS_DIR"
+echo "     - rank_X_component_time.png (one plot per rank)"
 echo ""
 
 # Show quick summary if available

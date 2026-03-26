@@ -218,6 +218,35 @@ if %errorlevel% neq 0 (
 echo.
 
 REM =============================================================================
+REM Step 3: Generate component time visualization
+REM =============================================================================
+echo ================================================================================
+echo Step 3: Generating Component Time Visualization
+echo ================================================================================
+echo.
+
+set COMPONENT_PLOTS_DIR=%TRACE_DIR%\component_plots
+
+REM Clean up previous plots
+if exist "%COMPONENT_PLOTS_DIR%" (
+    echo Removing previous plots...
+    rmdir /s /q "%COMPONENT_PLOTS_DIR%"
+)
+mkdir "%COMPONENT_PLOTS_DIR%"
+
+REM Run component time analysis
+%PYTHON_CMD% "%SCRIPT_DIR%analyze_rank_component_time.py" ^
+    "%ANALYSIS_DIR%" ^
+    "%COMPONENT_PLOTS_DIR%"
+
+if %errorlevel% neq 0 (
+    echo Error: Component visualization failed
+    exit /b 1
+)
+
+echo.
+
+REM =============================================================================
 REM Summary
 REM =============================================================================
 echo ================================================================================
@@ -232,6 +261,9 @@ echo   2. Aggregated results:   %AGGREGATED_DIR%
 echo      - aggregated_stats_per_layer.csv  (per-layer statistics)
 echo      - aggregated_stats_averaged.csv   (averaged across layers)
 echo      - aggregation_summary.txt         (human-readable summary)
+echo.
+echo   3. Component plots:      %COMPONENT_PLOTS_DIR%
+echo      - rank_X_component_time.png (one plot per rank)
 echo.
 
 REM Show quick summary if available
