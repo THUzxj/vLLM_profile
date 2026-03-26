@@ -27,6 +27,7 @@ EP=${EP:-8}
 TP=${TP:-8}
 MOE_DENSE_TP=${MOE_DENSE_TP:-1} # Only None or 1 is valid for now
 MODULE_NAME=${MODULE_NAME:-"-m sglang.launch_server"}
+MAX_RUNNING_REQUESTS_DECODE=${MAX_RUNNING_REQUESTS_DECODE:-256}
 
 # Source common arguments
 source "$(dirname "$0")/common_serve_args.sh"

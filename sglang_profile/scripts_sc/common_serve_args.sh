@@ -28,8 +28,11 @@ else
     DP_ATTENTION_ARGS=""
 fi
 
-ATTN_BACKEND=${ATTN_BACKEND:-"fa3"}
-DP_ATTENTION_ARGS+=" --attention-backend $ATTN_BACKEND"
+ATTN_BACKEND=${ATTN_BACKEND:-""}
+
+if [ -n "$ATTN_BACKEND" ]; then
+    DP_ATTENTION_ARGS+=" --attention-backend $ATTN_BACKEND"
+fi
 
 MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-0.8}
 
@@ -89,6 +92,7 @@ MASTER_PORT=${MASTER_PORT:-29500}
 ENABLE_PD_DISAGG=${ENABLE_PD_DISAGG:-0}
 PREFILL_NODES=${PREFILL_NODES:-1}
 DECODE_NODES=${DECODE_NODES:-1}
+MAX_RUNNING_REQUESTS_DECODE=${MAX_RUNNING_REQUESTS_DECODE:-256}
 
 MULTI_NODE_ARGS=""
 if [ "$WORLD_SIZE" -gt 1 ]; then
@@ -99,6 +103,7 @@ if [ "$WORLD_SIZE" -gt 1 ]; then
             echo "[WARN] WORLD_SIZE=$WORLD_SIZE does not match PREFILL_NODES+DECODE_NODES=$TOTAL_PD_NODES"
         fi
 
+        MULTI_NODE_ARGS=""
         if [ "$RANK" -lt "$PREFILL_NODES" ]; then
             DISAGG_MODE="prefill"
             DISAGG_NNODES=$PREFILL_NODES
@@ -112,12 +117,13 @@ if [ "$WORLD_SIZE" -gt 1 ]; then
             # Decode nodes connect to the last prefill worker
             PREFILL_WORKER_NUM=$((PREFILL_NODES - 1))
             DISAGG_DIST_ADDR="${DLC_JOB_ID}-worker-${PREFILL_WORKER_NUM}"
+            MULTI_NODE_ARGS+="--max-running-requests $MAX_RUNNING_REQUESTS_DECODE"
             echo "[INFO] Node $RANK assigned as DECODE node (internal rank=$DISAGG_RANK, nnodes=$DISAGG_NNODES)"
         else
             echo "[ERROR] RANK=$RANK exceeds total PD nodes ($TOTAL_PD_NODES)"
             exit 1
         fi
-        MULTI_NODE_ARGS="--host 0.0.0.0 --nnodes $DISAGG_NNODES --node-rank $DISAGG_RANK --dist-init-addr $DISAGG_DIST_ADDR:$MASTER_PORT"
+        MULTI_NODE_ARGS+="--host 0.0.0.0 --nnodes $DISAGG_NNODES --node-rank $DISAGG_RANK --dist-init-addr $DISAGG_DIST_ADDR:$MASTER_PORT"
         MULTI_NODE_ARGS+=" --disaggregation-mode $DISAGG_MODE"
     else
         MULTI_NODE_ARGS="--host 0.0.0.0 --nnodes $WORLD_SIZE --node-rank $RANK --dist-init-addr $MASTER_ADDR:$MASTER_PORT"
@@ -136,7 +142,7 @@ if [ "$ENABLE_EPLB" = 1 ]; then
     """
 
     if [ "$ARCHITECTURE" = "H" ]; then
-        if [ "$PROFILE_RANGES" = "0" || "$DISAGG_MODE" = "decode" ]; then
+        if [ "$PROFILE_RANGES" = "0" && "$DISAGG_MODE" = "decode" ]; then
             export SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=512
             EPLB_ARGS+="--moe-a2a-backend deepep --deepep-mode low_latency"
         else
