@@ -246,7 +246,7 @@ class ProfileTriggerThread(threading.Thread):
         log_interval: float = 5.0,
         dp_size: int = 1,
         target_dp_rank: int = 0,
-        max_running_requests_divisor: int = 2,
+        requests_per_batch_multiplier: int = 1,  # Multiplier for number of requests per batch
     ):
         super().__init__(daemon=True)
         self.decode_url = decode_url
@@ -264,7 +264,7 @@ class ProfileTriggerThread(threading.Thread):
         self.log_interval = log_interval
         self.dp_size = dp_size
         self.target_dp_rank = target_dp_rank
-        self.max_running_requests_divisor = max_running_requests_divisor
+        self.requests_per_batch_multiplier = requests_per_batch_multiplier
 
         self._stop_event = threading.Event()
         self.profile_link: Optional[str] = None
@@ -278,13 +278,13 @@ class ProfileTriggerThread(threading.Thread):
 
     def run(self):
         """Main loop: poll metrics and trigger profile when condition is met."""
-        # Divide by dp_size because running_requests from metrics is per DP rank
-        # Use batch_size // divisor as the actual max_running_requests
-        max_running_per_dp = (self.target_batch_size // self.max_running_requests_divisor) // self.dp_size
+        # max_running_per_dp = target_batch_size / dp_size (per DP rank)
+        max_running_per_dp = self.target_batch_size // self.dp_size
         trigger_count = int(max_running_per_dp * self.trigger_threshold)
         print(f"[ProfileTriggerThread] Started monitoring. Target: {self.target_batch_size} "
               f"(max_running_per_dp: {max_running_per_dp}), Trigger threshold: {trigger_count} ({self.trigger_threshold*100:.0f}%), "
-              f"DP size: {self.dp_size}, Target DP rank: {self.target_dp_rank}")
+              f"DP size: {self.dp_size}, Target DP rank: {self.target_dp_rank}, "
+              f"Requests per batch multiplier: {self.requests_per_batch_multiplier}")
 
         consecutive_hits = 0
         required_consecutive = 3  # Require 3 consecutive hits to trigger
@@ -375,6 +375,7 @@ class RequestSenderThread(threading.Thread):
         total_rounds: int = 0,
         wait_for_profile: bool = True,
         profile_trigger_thread: Optional[ProfileTriggerThread] = None,
+        requests_per_batch_multiplier: int = 1,  # Multiplier for number of requests per batch
     ):
         super().__init__(daemon=True)
         self.url = url
@@ -392,6 +393,7 @@ class RequestSenderThread(threading.Thread):
         self.total_rounds = total_rounds
         self.wait_for_profile = wait_for_profile
         self.profile_trigger_thread = profile_trigger_thread
+        self.requests_per_batch_multiplier = requests_per_batch_multiplier
 
         self._stop_event = threading.Event()
         self.rounds_completed = 0
@@ -407,10 +409,13 @@ class RequestSenderThread(threading.Thread):
 
     def _sample_payload(self) -> dict:
         """Sample a new payload for each round."""
+        # Calculate actual number of requests to send (multiplied by multiplier)
+        actual_batch_size = self.batch_size * self.requests_per_batch_multiplier
+
         # Sample input requests based on dataset type
         if self.dataset_name == "mmmu":
             input_requests = sample_mmmu_requests(
-                num_requests=self.batch_size,
+                num_requests=actual_batch_size,
                 processor=self.tokenizer,
                 fixed_output_len=self.output_len,
                 random_sample=False,
@@ -419,7 +424,7 @@ class RequestSenderThread(threading.Thread):
             input_requests = sample_random_requests(
                 input_len=self.input_len,
                 output_len=self.output_len,
-                num_prompts=self.batch_size,
+                num_prompts=actual_batch_size,
                 range_ratio=1.0,
                 tokenizer=self.tokenizer,
                 dataset_path=self.dataset_path,
@@ -430,7 +435,7 @@ class RequestSenderThread(threading.Thread):
             input_requests = sample_random_requests(
                 input_len=self.input_len,
                 output_len=self.output_len,
-                num_prompts=self.batch_size,
+                num_prompts=actual_batch_size,
                 range_ratio=1.0,
                 tokenizer=self.tokenizer,
                 dataset_path=self.dataset_path,
@@ -510,7 +515,8 @@ class RequestSenderThread(threading.Thread):
 
     def run(self):
         """Main loop: send requests asynchronously at fixed intervals."""
-        print(f"[RequestSenderThread] Started. batch_size={self.batch_size}, "
+        print(f"[RequestSenderThread] Started. target_batch_size={self.batch_size}, "
+              f"actual_requests_per_batch={self.batch_size * self.requests_per_batch_multiplier}, "
               f"send_interval={self.send_interval}s, total_rounds={self.total_rounds}")
 
         last_send_time = None
@@ -547,9 +553,11 @@ class RequestSenderThread(threading.Thread):
                 self._pending_futures.append(future)
 
                 self.rounds_completed += 1
-                self.total_requests_sent += self.batch_size
+                actual_requests_sent = self.batch_size * self.requests_per_batch_multiplier
+                self.total_requests_sent += actual_requests_sent
                 print(f"[RequestSenderThread] Round {self.rounds_completed}: "
-                      f"sent {self.batch_size} requests (async)")
+                      f"sent {actual_requests_sent} requests (target_batch_size={self.batch_size}, "
+                      f"multiplier={self.requests_per_batch_multiplier}, async)")
             except Exception as e:
                 self.errors.append(f"Error in round {self.rounds_completed}: {e}")
                 print(f"[RequestSenderThread] Error in round {self.rounds_completed}: {e}")
@@ -723,7 +731,7 @@ class BenchArgs:
     # Update max_running_requests before profiling
     update_max_running_reqs: bool = True
     max_running_reqs_update_retries: int = 30
-    max_running_requests_divisor: int = 2  # batch_size // divisor = max_running_requests
+    requests_per_batch_multiplier: int = 1  # Multiplier for number of requests per batch (sends batch_size * multiplier requests)
     target_dp_rank: int = 0  # DP rank to monitor for running requests
 
     @staticmethod
@@ -914,10 +922,13 @@ class BenchArgs:
             help="Max retries for updating max_running_requests. Default: 30.",
         )
         parser.add_argument(
-            "--max-running-requests-divisor",
+            "--requests-per-batch-multiplier",
             type=int,
-            default=BenchArgs.max_running_requests_divisor,
-            help="Divisor for calculating max_running_requests from batch_size. Default: 2 (i.e., max_running_requests = batch_size // 2).",
+            default=BenchArgs.requests_per_batch_multiplier,
+            help="Multiplier for number of requests per batch. "
+                 "Actual requests sent = batch_size * multiplier. "
+                 "This allows sending more requests than max_running_requests to saturate the system. "
+                 "Default: 1.",
         )
         parser.add_argument(
             "--target-dp-rank",
@@ -1405,10 +1416,10 @@ def run_one_case_with_metrics_trigger(
 
     # Update max_running_requests before starting if enabled
     if update_max_running_reqs:
-        # Calculate per-DP max_running_requests (set to batch_size // divisor)
-        new_max_running_reqs = (batch_size // max_running_requests_divisor) // dp_size
+        # Calculate per-DP max_running_requests (set to target_batch_size / dp_size)
+        new_max_running_reqs = (batch_size // dp_size)
         print(f"[run_one_case_with_metrics_trigger] Updating max_running_requests to {new_max_running_reqs} "
-              f"(batch_size={batch_size} // divisor={max_running_requests_divisor}, per DP)")
+              f"(target_batch_size={batch_size}, dp_size={dp_size}, per DP)")
 
         # Wait for server to be idle before updating
         print(f"[run_one_case_with_metrics_trigger] Waiting for server to be idle...")
@@ -1454,7 +1465,7 @@ def run_one_case_with_metrics_trigger(
         log_interval=profile_log_interval,
         dp_size=dp_size,
         target_dp_rank=target_dp_rank,
-        max_running_requests_divisor=max_running_requests_divisor,
+        requests_per_batch_multiplier=requests_per_batch_multiplier,
     )
 
     # Create request sender thread
@@ -1474,6 +1485,7 @@ def run_one_case_with_metrics_trigger(
         total_rounds=total_rounds,
         wait_for_profile=wait_for_profile,
         profile_trigger_thread=profile_trigger_thread,
+        requests_per_batch_multiplier=requests_per_batch_multiplier,
     )
 
     # Start both threads

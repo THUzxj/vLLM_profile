@@ -296,6 +296,28 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
     export RESULT_DIR="$BENCH_RESULT_DIR"
     export SGLANG_TORCH_PROFILER_DIR="$BENCH_RESULT_DIR/torch_profile"
     mkdir -p "$SGLANG_TORCH_PROFILER_DIR"
+
+    # Get decode and prefill URLs from NFS files (first IP of each group)
+    DECODE_NODE_NAME="decode_0"
+    PREFILL_NODE_NAME="prefill_0"
+
+    DECODE_IP=$(get_node_ip "$DECODE_NODE_NAME")
+    PREFILL_IP=$(get_node_ip "$PREFILL_NODE_NAME")
+
+    if [ -n "$DECODE_IP" ]; then
+        export DECODE_URL="http://${DECODE_IP}:30000"
+        echo "[INFO] DECODE_URL set to: $DECODE_URL"
+    else
+        echo "[WARN] Could not find decode IP for node $DECODE_NODE_NAME"
+    fi
+
+    if [ -n "$PREFILL_IP" ]; then
+        export PREFILL_URL="http://${PREFILL_IP}:30000"
+        echo "[INFO] PREFILL_URL set to: $PREFILL_URL"
+    else
+        echo "[WARN] Could not find prefill IP for node $PREFILL_NODE_NAME"
+    fi
+
     echo "[INFO] NODE_RANK is $NODE_RANK, running benchmark..."
     bash "$BENCH_SCRIPT" 2>&1 | tee "$BENCH_LOG"
     BENCH_EXIT_CODE=$?
