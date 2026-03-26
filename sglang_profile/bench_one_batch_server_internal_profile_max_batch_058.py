@@ -277,10 +277,11 @@ class ProfileTriggerThread(threading.Thread):
     def run(self):
         """Main loop: poll metrics and trigger profile when condition is met."""
         # Divide by dp_size because running_requests from metrics is per DP rank
-        target_per_dp = self.target_batch_size // self.dp_size
-        trigger_count = int(target_per_dp * self.trigger_threshold)
+        # Use half of batch_size as the actual max_running_requests
+        max_running_per_dp = (self.target_batch_size // 2) // self.dp_size
+        trigger_count = int(max_running_per_dp * self.trigger_threshold)
         print(f"[ProfileTriggerThread] Started monitoring. Target: {self.target_batch_size} "
-              f"(per DP: {target_per_dp}), Trigger threshold: {trigger_count} ({self.trigger_threshold*100:.0f}%), "
+              f"(max_running_per_dp: {max_running_per_dp}), Trigger threshold: {trigger_count} ({self.trigger_threshold*100:.0f}%), "
               f"DP size: {self.dp_size}, Target DP rank: {self.target_dp_rank}")
 
         consecutive_hits = 0
