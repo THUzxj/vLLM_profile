@@ -1393,9 +1393,9 @@ def run_one_case_with_metrics_trigger(
 
     # Update max_running_requests before starting if enabled
     if update_max_running_reqs:
-        # Calculate per-DP max_running_requests
-        new_max_running_reqs = batch_size // dp_size
-        print(f"[run_one_case_with_metrics_trigger] Updating max_running_requests to {new_max_running_reqs} (per DP)")
+        # Calculate per-DP max_running_requests (set to half of batch_size)
+        new_max_running_reqs = (batch_size // 2) // dp_size
+        print(f"[run_one_case_with_metrics_trigger] Updating max_running_requests to {new_max_running_reqs} (half of batch_size={batch_size}, per DP)")
 
         # Wait for server to be idle before updating
         print(f"[run_one_case_with_metrics_trigger] Waiting for server to be idle...")
