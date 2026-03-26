@@ -57,7 +57,7 @@ get_ip_from_interfaces() {
         if ip link show "$iface" &> /dev/null 2>&1; then
             ip=$(get_ip_address "$iface")
             if [ -n "$ip" ]; then
-                echo "[INFO] Found IP $ip on interface $iface"
+                echo "[INFO] Found IP $ip on interface $iface" >&2
                 echo "$ip"
                 return 0
             fi
@@ -65,7 +65,7 @@ get_ip_from_interfaces() {
     done
 
     # Fallback: try to get any non-loopback IP
-    echo "[INFO] Trying fallback method to get non-loopback IP..."
+    echo "[INFO] Trying fallback method to get non-loopback IP..." >&2
     if command -v ip &> /dev/null; then
         ip=$(ip addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '^127\.' | head -1)
     elif command -v ifconfig &> /dev/null; then
@@ -73,12 +73,12 @@ get_ip_from_interfaces() {
     fi
 
     if [ -n "$ip" ]; then
-        echo "[INFO] Found IP $ip using fallback method"
+        echo "[INFO] Found IP $ip using fallback method" >&2
         echo "$ip"
         return 0
     fi
 
-    echo "[ERROR] Could not find a valid IP address"
+    echo "[ERROR] Could not find a valid IP address" >&2
     return 1
 }
 
@@ -87,7 +87,7 @@ get_hostname_ip() {
     if command -v hostname &> /dev/null; then
         hostname_ip=$(hostname -i 2>/dev/null || echo "")
         if [ -n "$hostname_ip" ] && [ "$hostname_ip" != "127.0.0.1" ] && [ "$hostname_ip" != "127.0.1.1" ]; then
-            echo "[INFO] Found IP $hostname_ip from hostname"
+            echo "[INFO] Found IP $hostname_ip from hostname" >&2
             echo "$hostname_ip"
             return 0
         fi
