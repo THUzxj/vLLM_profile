@@ -116,7 +116,23 @@ if [ "$WORLD_SIZE" -gt 1 ]; then
             DISAGG_RANK=$((RANK - PREFILL_NODES))
             # Decode nodes connect to the last prefill worker
             PREFILL_WORKER_NUM=$((PREFILL_NODES - 1))
-            DISAGG_DIST_ADDR="${DLC_JOB_ID}-worker-${PREFILL_WORKER_NUM}"
+            if [ $PREFILL_WORKER_NUM -eq 0 ]; then
+                PREFILL_HOST="${DLC_JOB_ID}-master-0"
+            else
+                PREFILL_HOST="${DLC_JOB_ID}-worker-$((PREFILL_WORKER_NUM - 1))"
+            fi
+            echo "[INFO] Decode node waiting for prefill node IP: $PREFILL_HOST"
+            if wait_for_node_ip "$PREFILL_HOST"; then
+                DISAGG_DIST_ADDR=$(get_node_ip "$PREFILL_HOST")
+                if [ -z "$DISAGG_DIST_ADDR" ]; then
+                    echo "[ERROR] Failed to get IP for $PREFILL_HOST"
+                    exit 1
+                fi
+                echo "[INFO] Decode node will connect to prefill node at IP: $DISAGG_DIST_ADDR"
+            else
+                echo "[ERROR] Timeout waiting for $PREFILL_HOST IP"
+                exit 1
+            fi
             MULTI_NODE_ARGS+="--max-running-requests $MAX_RUNNING_REQUESTS_DECODE"
             echo "[INFO] Node $RANK assigned as DECODE node (internal rank=$DISAGG_RANK, nnodes=$DISAGG_NNODES)"
         else

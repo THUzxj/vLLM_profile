@@ -1,6 +1,30 @@
 #!/bin/bash
 set -e
 
+# Register node IP before starting server
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REGISTER_SCRIPT="$SCRIPT_DIR/register_node_ip.sh"
+
+if [ -f "$REGISTER_SCRIPT" ]; then
+    echo "=========================================="
+    echo "Registering node IP address..."
+    echo "=========================================="
+
+    export NODE_TYPE=${NODE_TYPE:-"worker"}
+    if [ -n "${RANK:-}" ] && [ "$RANK" = "0" ] && [ "${WORLD_SIZE:-1}" -gt 1 ]; then
+        export NODE_TYPE="master"
+    fi
+    export NODE_RANK=${RANK:-0}
+
+    bash "$REGISTER_SCRIPT"
+    echo "[INFO] Node IP registered, waiting 5 seconds for other nodes..."
+    sleep 5
+    echo "[INFO] Continuing with server launch..."
+    echo ""
+else
+    echo "[WARN] register_node_ip.sh not found, skipping IP registration"
+fi
+
 # Configuration
 SERVER_READY_TIMEOUT=32000  # Maximum wait time in seconds
 SERVER_READY_CHECK_INTERVAL=2  # Check interval in seconds
@@ -15,6 +39,44 @@ EP_NUM_REDUNDANT_EXPERTS=${EP_NUM_REDUNDANT_EXPERTS:-0}
 PROFILE_RANGES=${PROFILE_RANGES:-0}
 ONLY_LAUNCH=${ONLY_LAUNCH:-0}
 MAX_RUNNING_REQUESTS_DECODE=${MAX_RUNNING_REQUESTS_DECODE:-256}
+
+# NFS shared directory for node IP mapping
+NFS_SHARED_DIR=${NFS_SHARED_DIR:-"/nfs/shared"}
+
+# Function to get node IP from NFS file
+# Usage: get_node_ip <node_name>
+# Returns: IP address or empty string if not found
+get_node_ip() {
+    local node_name=$1
+    local ip_file="$NFS_SHARED_DIR/${node_name}.ip"
+
+    if [ -f "$ip_file" ]; then
+        cat "$ip_file" | tr -d '[:space:]'
+    else
+        echo ""
+    fi
+}
+
+# Function to wait for node IP file to be available
+# Usage: wait_for_node_ip <node_name> [timeout_seconds]
+# Returns: 0 if IP found, 1 if timeout
+wait_for_node_ip() {
+    local node_name=$1
+    local timeout=${2:-60}
+    local ip_file="$NFS_SHARED_DIR/${node_name}.ip"
+    local start_time=$(date +%s)
+
+    while [ ! -f "$ip_file" ]; do
+        local elapsed_time=$(( $(date +%s) - start_time ))
+        if [ $elapsed_time -ge $timeout ]; then
+            echo "[ERROR] Timeout waiting for IP file: $ip_file"
+            return 1
+        fi
+        sleep 1
+    done
+
+    return 0
+}
 
 # Only allow Nsight Systems profiling on rank 0
 # If ENABLE_NSYS_PROFILE is set for multi-node runs, non-zero ranks will have it disabled.
