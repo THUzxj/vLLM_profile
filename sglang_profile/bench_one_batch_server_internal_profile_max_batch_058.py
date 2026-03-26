@@ -246,6 +246,7 @@ class ProfileTriggerThread(threading.Thread):
         log_interval: float = 5.0,
         dp_size: int = 1,
         target_dp_rank: int = 0,
+        max_running_requests_divisor: int = 2,
     ):
         super().__init__(daemon=True)
         self.decode_url = decode_url
@@ -263,6 +264,7 @@ class ProfileTriggerThread(threading.Thread):
         self.log_interval = log_interval
         self.dp_size = dp_size
         self.target_dp_rank = target_dp_rank
+        self.max_running_requests_divisor = max_running_requests_divisor
 
         self._stop_event = threading.Event()
         self.profile_link: Optional[str] = None
@@ -277,8 +279,8 @@ class ProfileTriggerThread(threading.Thread):
     def run(self):
         """Main loop: poll metrics and trigger profile when condition is met."""
         # Divide by dp_size because running_requests from metrics is per DP rank
-        # Use half of batch_size as the actual max_running_requests
-        max_running_per_dp = (self.target_batch_size // 2) // self.dp_size
+        # Use batch_size // divisor as the actual max_running_requests
+        max_running_per_dp = (self.target_batch_size // self.max_running_requests_divisor) // self.dp_size
         trigger_count = int(max_running_per_dp * self.trigger_threshold)
         print(f"[ProfileTriggerThread] Started monitoring. Target: {self.target_batch_size} "
               f"(max_running_per_dp: {max_running_per_dp}), Trigger threshold: {trigger_count} ({self.trigger_threshold*100:.0f}%), "
@@ -721,6 +723,7 @@ class BenchArgs:
     # Update max_running_requests before profiling
     update_max_running_reqs: bool = True
     max_running_reqs_update_retries: int = 30
+    max_running_requests_divisor: int = 2  # batch_size // divisor = max_running_requests
     target_dp_rank: int = 0  # DP rank to monitor for running requests
 
     @staticmethod
@@ -909,6 +912,12 @@ class BenchArgs:
             type=int,
             default=BenchArgs.max_running_reqs_update_retries,
             help="Max retries for updating max_running_requests. Default: 30.",
+        )
+        parser.add_argument(
+            "--max-running-requests-divisor",
+            type=int,
+            default=BenchArgs.max_running_requests_divisor,
+            help="Divisor for calculating max_running_requests from batch_size. Default: 2 (i.e., max_running_requests = batch_size // 2).",
         )
         parser.add_argument(
             "--target-dp-rank",
@@ -1337,6 +1346,7 @@ def run_one_case_with_metrics_trigger(
     # Update max_running_requests parameter
     update_max_running_reqs: bool = True,
     max_running_reqs_update_retries: int = 30,
+    max_running_requests_divisor: int = 2,
     # Timeout for the entire operation
     timeout: float = 600.0,
 ):
@@ -1378,6 +1388,7 @@ def run_one_case_with_metrics_trigger(
         wait_for_profile: Whether to wait for profile to complete
         update_max_running_reqs: Whether to update max_running_requests to batch_size before profiling
         max_running_reqs_update_retries: Max retries for updating max_running_requests
+        max_running_requests_divisor: Divisor for calculating max_running_requests (max_running_requests = batch_size // divisor)
         timeout: Timeout for the entire operation
     """
     response = requests.post(url + "/flush_cache", timeout=DEFAULT_TIMEOUT)
@@ -1394,9 +1405,10 @@ def run_one_case_with_metrics_trigger(
 
     # Update max_running_requests before starting if enabled
     if update_max_running_reqs:
-        # Calculate per-DP max_running_requests (set to half of batch_size)
-        new_max_running_reqs = (batch_size // 2) // dp_size
-        print(f"[run_one_case_with_metrics_trigger] Updating max_running_requests to {new_max_running_reqs} (half of batch_size={batch_size}, per DP)")
+        # Calculate per-DP max_running_requests (set to batch_size // divisor)
+        new_max_running_reqs = (batch_size // max_running_requests_divisor) // dp_size
+        print(f"[run_one_case_with_metrics_trigger] Updating max_running_requests to {new_max_running_reqs} "
+              f"(batch_size={batch_size} // divisor={max_running_requests_divisor}, per DP)")
 
         # Wait for server to be idle before updating
         print(f"[run_one_case_with_metrics_trigger] Waiting for server to be idle...")
@@ -1442,6 +1454,7 @@ def run_one_case_with_metrics_trigger(
         log_interval=profile_log_interval,
         dp_size=dp_size,
         target_dp_rank=target_dp_rank,
+        max_running_requests_divisor=max_running_requests_divisor,
     )
 
     # Create request sender thread
@@ -1833,6 +1846,7 @@ def run_benchmark_internal(
                             wait_for_profile=bench_args.wait_for_profile,
                             update_max_running_reqs=bench_args.update_max_running_reqs,
                             max_running_reqs_update_retries=bench_args.max_running_reqs_update_retries,
+                            max_running_requests_divisor=bench_args.max_running_requests_divisor,
                         )
                     )
             except Exception as e:
