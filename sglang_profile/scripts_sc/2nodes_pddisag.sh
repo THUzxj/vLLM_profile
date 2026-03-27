@@ -16,7 +16,7 @@ SKIP_WARMUP=1 \
 PROFILE_POLLING_INTERVAL=0.5 \
 SEND_INTERVAL=5 \
 IL="1000" BS="256" OL="100" PROFILE_STEPS=50 \
-bash scripts_sc/launch_and_bench_server.sh \
+bash scripts_sc/launch_and_bench_server_pddisagg.sh \
 scripts_sc/launch_server_deepseek-v3_formal_torchprofile_pddisagg_H.sh \
 scripts_sc/bench_one_batch_server_profile_metrics_trigger.sh
 

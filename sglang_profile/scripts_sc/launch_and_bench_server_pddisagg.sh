@@ -40,6 +40,11 @@ PROFILE_RANGES=${PROFILE_RANGES:-0}
 ONLY_LAUNCH=${ONLY_LAUNCH:-0}
 MAX_RUNNING_REQUESTS_DECODE=${MAX_RUNNING_REQUESTS_DECODE:-256}
 
+# Router configuration (only started on rank 0)
+ROUTER_PORT=${ROUTER_PORT:-9001}
+ROUTER_POLICY=${ROUTER_POLICY:-"cache_aware"}
+
+
 # NFS shared directory for node IP mapping
 NFS_SHARED_DIR=${NFS_SHARED_DIR:-"/nfs/shared"}
 

@@ -32,10 +32,6 @@ MAX_RUNNING_REQUESTS_DECODE=${MAX_RUNNING_REQUESTS_DECODE:-256}
 # Source common arguments
 source "$(dirname "$0")/common_serve_args.sh"
 
-# Router configuration (only started on rank 0)
-ROUTER_PORT=${ROUTER_PORT:-9001}
-ROUTER_POLICY=${ROUTER_POLICY:-"cache_aware"}
-
 # Allow RESULT_DIR to be passed from external script
 # If not provided, use default pattern
 # Usage: RESULT_DIR=/path/to/results ./launch_server_deepseek-v3_formal_torchprofile_mapping_H.sh
