@@ -52,7 +52,7 @@ get_ip_address() {
 
 # Try to get IP address from common network interfaces
 get_ip_from_interfaces() {
-    local interfaces=("eth0" "eth1" "en0" "en1" "bond0" "ib0" "ib1")
+    local interfaces=("net0" "eth0" "eth1" "en0" "en1" "bond0" "ib0" "ib1")
     local ip=""
 
     for iface in "${interfaces[@]}"; do
