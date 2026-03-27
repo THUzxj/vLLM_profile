@@ -38,6 +38,10 @@ ENABLE_TBO=${ENABLE_TBO:-0}
 EP_NUM_REDUNDANT_EXPERTS=${EP_NUM_REDUNDANT_EXPERTS:-0}
 PROFILE_RANGES=${PROFILE_RANGES:-0}
 ONLY_LAUNCH=${ONLY_LAUNCH:-0}
+ENABLE_PD_DISAGG=${ENABLE_PD_DISAGG:-0}
+PREFILL_NODES=${PREFILL_NODES:-1}
+DECODE_NODES=${DECODE_NODES:-1}
+TOTAL_PD_NODES=$((PREFILL_NODES + DECODE_NODES))
 MAX_RUNNING_REQUESTS_DECODE=${MAX_RUNNING_REQUESTS_DECODE:-256}
 
 # Router configuration (only started on rank 0)
@@ -310,11 +314,11 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
     # Get decode and prefill URLs from NFS files (first IP of each group)
     # Use machine-index naming from register_node_ip.sh:
     # - first prefill node: ${DLC_JOB_ID}-master-0 (rank 0)
-    # - first decode node:  ${DLC_JOB_ID}-worker-$((PREFILL_NODES - 1)) (rank PREFILL_NODES)
+    # - first decode node:  ${DLC_JOB_ID}-worker-$((PREFILL_NODES - 1)) (rank PREFILL_NODES, worker_num = rank - 1)
     DLC_JOB_ID=${DLC_JOB_ID:-"test-job"}
-    PREFILL_NODES=${PREFILL_NODES:-1}
     PREFILL_NODE_NAME="${DLC_JOB_ID}-master-0"
-    DECODE_FIRST_WORKER_NUM=$((PREFILL_NODES - 1))
+    DECODE_FIRST_RANK=$PREFILL_NODES
+    DECODE_FIRST_WORKER_NUM=$((DECODE_FIRST_RANK - 1))
     DECODE_NODE_NAME="${DLC_JOB_ID}-worker-${DECODE_FIRST_WORKER_NUM}"
 
     DECODE_IP=$(get_node_ip "$DECODE_NODE_NAME")
@@ -371,15 +375,16 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
 
         # Wait for IP files and get decode node IPs
         DECODE_IPS=()
-        for i in $(seq $((PREFILL_NODES - 1)) $((TOTAL_PD_NODES - 2))); do
-            DECODE_HOST="${DLC_JOB_ID}-worker-${i}"
+        for decode_rank in $(seq "$PREFILL_NODES" $((TOTAL_PD_NODES - 1))); do
+            decode_worker_num=$((decode_rank - 1))
+            DECODE_HOST="${DLC_JOB_ID}-worker-${decode_worker_num}"
 
             echo "[INFO] Waiting for decode node IP: $DECODE_HOST"
             if wait_for_node_ip "$DECODE_HOST"; then
                 DECODE_IP=$(get_node_ip "$DECODE_HOST")
                 if [ -n "$DECODE_IP" ]; then
                     DECODE_IPS+=("$DECODE_IP")
-                    echo "[INFO] Got decode node IP: $DECODE_IP"
+                    echo "[INFO] Got decode node rank ${decode_rank} (worker-${decode_worker_num}) IP: $DECODE_IP"
                 else
                     echo "[ERROR] Failed to get IP for $DECODE_HOST"
                     exit 1
