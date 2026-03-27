@@ -1726,10 +1726,15 @@ def run_benchmark_internal(
     response = requests.get(server_info_url + "/get_server_info", timeout=DEFAULT_TIMEOUT)
     response.raise_for_status()
     server_info = response.json()
+    
+    tokenizer_path = None
     if "tokenizer_path" in server_info:
         tokenizer_path = server_info["tokenizer_path"]
     elif "prefill" in server_info:
         tokenizer_path = server_info["prefill"][0]["tokenizer_path"]
+    else:
+        print("Warning: tokenizer_path not found in server info, using default tokenizer")
+    print(f"Using tokenizer from path: {tokenizer_path}")
     if bench_args.dataset_name == "mmmu":
         # mmmu implies this is a MLLM
         tokenizer = get_processor(tokenizer_path)
