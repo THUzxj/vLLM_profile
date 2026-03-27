@@ -54,12 +54,17 @@ NFS_SHARED_DIR=${NFS_SHARED_DIR:-"/nfs/shared"}
 get_node_ip() {
     local node_name=$1
     local ip_file="$NFS_SHARED_DIR/${node_name}.ip"
+    local ip=""
 
     if [ -f "$ip_file" ]; then
-        cat "$ip_file" | tr -d '[:space:]'
+        ip=$(cat "$ip_file" | tr -d '[:space:]')
+        if [ -z "$ip" ]; then
+            echo "[WARN] get_node_ip: empty IP content for node $node_name (file: $ip_file)" >&2
+        fi
     else
-        echo ""
+        echo "[WARN] get_node_ip: IP file not found for node $node_name (file: $ip_file)" >&2
     fi
+    echo "$ip"
 }
 
 # Function to wait for node IP file to be available
@@ -303,8 +308,14 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
     mkdir -p "$SGLANG_TORCH_PROFILER_DIR"
 
     # Get decode and prefill URLs from NFS files (first IP of each group)
-    DECODE_NODE_NAME="decode_0"
-    PREFILL_NODE_NAME="prefill_0"
+    # Use machine-index naming from register_node_ip.sh:
+    # - first prefill node: ${DLC_JOB_ID}-master-0 (rank 0)
+    # - first decode node:  ${DLC_JOB_ID}-worker-$((PREFILL_NODES - 1)) (rank PREFILL_NODES)
+    DLC_JOB_ID=${DLC_JOB_ID:-"test-job"}
+    PREFILL_NODES=${PREFILL_NODES:-1}
+    PREFILL_NODE_NAME="${DLC_JOB_ID}-master-0"
+    DECODE_FIRST_WORKER_NUM=$((PREFILL_NODES - 1))
+    DECODE_NODE_NAME="${DLC_JOB_ID}-worker-${DECODE_FIRST_WORKER_NUM}"
 
     DECODE_IP=$(get_node_ip "$DECODE_NODE_NAME")
     PREFILL_IP=$(get_node_ip "$PREFILL_NODE_NAME")
@@ -324,7 +335,7 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
     fi
 
     # Start router if PD disaggregation is enabled
-    if [ "${ENABLE_PD_DISAGG:-0}" -eq 1 ]; then
+    # if [ "${ENABLE_PD_DISAGG:-0}" -eq 1 ]; then
         echo "[INFO] PD disaggregation mode enabled, starting router..."
 
         # Wait for IP files and get prefill node IPs
@@ -389,6 +400,7 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
         echo "[INFO] Prefill IPs: ${PREFILL_IPS[@]}"
         echo "[INFO] Decode IPs: ${DECODE_IPS[@]}"
         python3 -m sglang_router.launch_router \
+            --port 8000 \
             --pd-disaggregation \
             $ROUTER_PREFILL_ARGS \
             $ROUTER_DECODE_ARGS \
@@ -400,7 +412,7 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
         ROUTER_STARTUP_DELAY=${ROUTER_STARTUP_DELAY:-5}
         echo "[INFO] Waiting ${ROUTER_STARTUP_DELAY}s for router to be ready..."
         sleep $ROUTER_STARTUP_DELAY
-    fi
+    # fi
 
     echo "[INFO] NODE_RANK is $NODE_RANK, running benchmark..."
     bash "$BENCH_SCRIPT" 2>&1 | tee "$BENCH_LOG"
