@@ -54,15 +54,42 @@ get_ip_address() {
 get_ip_from_interfaces() {
     local interfaces=("net0")
     local ip=""
+    local ip_cmd_available=false
+    local ifconfig_cmd_available=false
+
+    # Check which commands are available
+    if command -v ip &> /dev/null; then
+        ip_cmd_available=true
+    elif command -v ifconfig &> /dev/null; then
+        ifconfig_cmd_available=true
+    else
+        echo "[ERROR] Neither 'ip' nor 'ifconfig' command found. Please install iproute2 or net-tools package." >&2
+        return 1
+    fi
 
     for iface in "${interfaces[@]}"; do
-        if ip link show "$iface" &> /dev/null 2>&1; then
-            ip=$(get_ip_address "$iface")
-            if [ -n "$ip" ]; then
-                echo "[INFO] Found IP $ip on interface $iface" >&2
-                echo "$ip"
-                return 0
+        local found=false
+
+        # Try ip command if available
+        if [ "$ip_cmd_available" = true ]; then
+            if ip link show "$iface" &> /dev/null 2>&1; then
+                ip=$(ip addr show "$iface" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+                found=true
             fi
+        fi
+
+        # Try ifconfig command if available and ip didn't work
+        if [ "$found" = false ] && [ "$ifconfig_cmd_available" = true ]; then
+            if ifconfig "$iface" &> /dev/null 2>&1; then
+                ip=$(ifconfig "$iface" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+                found=true
+            fi
+        fi
+
+        if [ -n "$ip" ]; then
+            echo "[INFO] Found IP $ip on interface $iface" >&2
+            echo "$ip"
+            return 0
         fi
     done
 
