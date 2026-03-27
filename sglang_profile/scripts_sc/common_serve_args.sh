@@ -149,23 +149,25 @@ if [ "$WORLD_SIZE" -gt 1 ]; then
             DISAGG_MODE="decode"
             DISAGG_NNODES=$DECODE_NODES
             DISAGG_RANK=$((RANK - PREFILL_NODES))
-            # Decode nodes connect to the last prefill worker
-            PREFILL_WORKER_NUM=$((PREFILL_NODES - 1))
-            if [ $PREFILL_WORKER_NUM -eq 0 ]; then
-                PREFILL_HOST="${DLC_JOB_ID}-master-0"
+            # Decode nodes connect to the first decode node (decode group internal communication)
+            DECODE_WORKER_NUM=$((RANK - PREFILL_NODES))
+            if [ $DECODE_WORKER_NUM -eq 0 ]; then
+                # First decode node uses itself as dist-init-addr
+                DECODE_HOST="${DLC_JOB_ID}-worker-${DECODE_WORKER_NUM}"
             else
-                PREFILL_HOST="${DLC_JOB_ID}-worker-$((PREFILL_WORKER_NUM - 1))"
+                # Other decode nodes connect to the first decode node
+                DECODE_HOST="${DLC_JOB_ID}-worker-0"
             fi
-            echo "[INFO] Decode node waiting for prefill node IP: $PREFILL_HOST"
-            if wait_for_node_ip "$PREFILL_HOST"; then
-                DISAGG_DIST_ADDR=$(get_node_ip "$PREFILL_HOST")
+            echo "[INFO] Decode node waiting for decode node IP: $DECODE_HOST"
+            if wait_for_node_ip "$DECODE_HOST"; then
+                DISAGG_DIST_ADDR=$(get_node_ip "$DECODE_HOST")
                 if [ -z "$DISAGG_DIST_ADDR" ]; then
-                    echo "[ERROR] Failed to get IP for $PREFILL_HOST"
+                    echo "[ERROR] Failed to get IP for $DECODE_HOST"
                     exit 1
                 fi
-                echo "[INFO] Decode node will connect to prefill node at IP: $DISAGG_DIST_ADDR"
+                echo "[INFO] Decode node will connect to decode node at IP: $DISAGG_DIST_ADDR (for group internal communication)"
             else
-                echo "[ERROR] Timeout waiting for $PREFILL_HOST IP"
+                echo "[ERROR] Timeout waiting for $DECODE_HOST IP"
                 exit 1
             fi
             MULTI_NODE_ARGS+="--max-running-requests $MAX_RUNNING_REQUESTS_DECODE"
