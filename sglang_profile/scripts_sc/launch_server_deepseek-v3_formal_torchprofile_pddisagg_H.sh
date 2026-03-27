@@ -50,74 +50,7 @@ RESULT_FILENAME="$RESULT_DIR/result.log"
 
 # Build router arguments and start router on rank 0 before server
 if [ "$ENABLE_PD_DISAGG" -eq 1 ] && [ "$RANK" -eq 0 ]; then
-    # Wait for IP files and get prefill node IPs
-    PREFILL_IPS=()
-    for i in $(seq 0 $((PREFILL_NODES - 1))); do
-        if [ $i -eq 0 ]; then
-            PREFILL_HOST="${DLC_JOB_ID}-master-0"
-        else
-            PREFILL_HOST="${DLC_JOB_ID}-worker-$((i - 1))"
-        fi
-
-        echo "[INFO] Waiting for prefill node IP: $PREFILL_HOST"
-        if wait_for_node_ip "$PREFILL_HOST"; then
-            PREFILL_IP=$(get_node_ip "$PREFILL_HOST")
-            if [ -n "$PREFILL_IP" ]; then
-                PREFILL_IPS+=("$PREFILL_IP")
-                echo "[INFO] Got prefill node $i IP: $PREFILL_IP"
-            else
-                echo "[ERROR] Failed to get IP for $PREFILL_HOST"
-                exit 1
-            fi
-        else
-            echo "[ERROR] Timeout waiting for $PREFILL_HOST IP"
-            exit 1
-        fi
-    done
-
-    # Build prefill URLs using IPs
-    ROUTER_PREFILL_ARGS="--prefill http://${PREFILL_IPS[0]}:30000 ${ROUTER_PORT}"
-    for i in $(seq 1 $((PREFILL_NODES - 1))); do
-        ROUTER_PREFILL_ARGS="$ROUTER_PREFILL_ARGS --prefill http://${PREFILL_IPS[$i]}:30000"
-    done
-
-    # Wait for IP files and get decode node IPs
-    DECODE_IPS=()
-    for i in $(seq $((PREFILL_NODES - 1)) $((TOTAL_PD_NODES - 2))); do
-        DECODE_HOST="${DLC_JOB_ID}-worker-${i}"
-
-        echo "[INFO] Waiting for decode node IP: $DECODE_HOST"
-        if wait_for_node_ip "$DECODE_HOST"; then
-            DECODE_IP=$(get_node_ip "$DECODE_HOST")
-            if [ -n "$DECODE_IP" ]; then
-                DECODE_IPS+=("$DECODE_IP")
-                echo "[INFO] Got decode node IP: $DECODE_IP"
-            else
-                echo "[ERROR] Failed to get IP for $DECODE_HOST"
-                exit 1
-            fi
-        else
-            echo "[ERROR] Timeout waiting for $DECODE_HOST IP"
-            exit 1
-        fi
-    done
-
-    # Build decode URLs using IPs
-    ROUTER_DECODE_ARGS=""
-    for ip in "${DECODE_IPS[@]}"; do
-        ROUTER_DECODE_ARGS="$ROUTER_DECODE_ARGS --decode http://${ip}:30000"
-    done
-
-    echo "[INFO] Starting router with: prefill_nodes=$PREFILL_NODES, decode_nodes=$DECODE_NODES"
-    echo "[INFO] Prefill IPs: ${PREFILL_IPS[@]}"
-    echo "[INFO] Decode IPs: ${DECODE_IPS[@]}"
-    python3 -m sglang_router.launch_router \
-        --pd-disaggregation \
-        $ROUTER_PREFILL_ARGS \
-        $ROUTER_DECODE_ARGS \
-        --policy $ROUTER_POLICY &
-    ROUTER_PID=$!
-    echo "[INFO] Router started with PID $ROUTER_PID on port $ROUTER_PORT"
+    echo "[INFO] PD disaggregation mode enabled. Router will be started in launch_and_bench_server_pddisagg.sh after server is ready."
 fi
 
 # Optional Nsight Systems profiling (capture-range mode)
