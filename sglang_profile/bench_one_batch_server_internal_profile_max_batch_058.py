@@ -1357,7 +1357,7 @@ def run_one_case_with_metrics_trigger(
     # Update max_running_requests parameter
     update_max_running_reqs: bool = True,
     max_running_reqs_update_retries: int = 30,
-    max_running_requests_divisor: int = 2,
+    requests_per_batch_multiplier: int = 1,
     # Timeout for the entire operation
     timeout: float = 600.0,
 ):
@@ -1399,7 +1399,7 @@ def run_one_case_with_metrics_trigger(
         wait_for_profile: Whether to wait for profile to complete
         update_max_running_reqs: Whether to update max_running_requests to batch_size before profiling
         max_running_reqs_update_retries: Max retries for updating max_running_requests
-        max_running_requests_divisor: Divisor for calculating max_running_requests (max_running_requests = batch_size // divisor)
+        requests_per_batch_multiplier: Multiplier for number of requests sent per round
         timeout: Timeout for the entire operation
     """
     response = requests.post(url + "/flush_cache", timeout=DEFAULT_TIMEOUT)
@@ -1863,7 +1863,7 @@ def run_benchmark_internal(
                             wait_for_profile=bench_args.wait_for_profile,
                             update_max_running_reqs=bench_args.update_max_running_reqs,
                             max_running_reqs_update_retries=bench_args.max_running_reqs_update_retries,
-                            max_running_requests_divisor=bench_args.max_running_requests_divisor,
+                            requests_per_batch_multiplier=bench_args.requests_per_batch_multiplier,
                         )
                     )
             except Exception as e:
