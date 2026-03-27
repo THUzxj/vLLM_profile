@@ -13,7 +13,9 @@ get_node_name() {
     if [ "$NODE_TYPE" = "master" ]; then
         echo "${DLC_JOB_ID}-master-0"
     else
-        echo "${DLC_JOB_ID}-worker-${NODE_RANK}"
+        # Worker rank is RANK - 1 (since RANK 0 is master)
+        worker_num=$((NODE_RANK - 1))
+        echo "${DLC_JOB_ID}-worker-${worker_num}"
     fi
 }
 
