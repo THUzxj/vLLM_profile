@@ -52,7 +52,7 @@ get_ip_address() {
 
 # Try to get IP address from common network interfaces
 get_ip_from_interfaces() {
-    local interfaces=("net0" "eth0" "eth1" "en0" "en1" "bond0" "ib0" "ib1")
+    local interfaces=("net0")
     local ip=""
 
     for iface in "${interfaces[@]}"; do
@@ -66,21 +66,7 @@ get_ip_from_interfaces() {
         fi
     done
 
-    # Fallback: try to get any non-loopback IP
-    echo "[INFO] Trying fallback method to get non-loopback IP..." >&2
-    if command -v ip &> /dev/null; then
-        ip=$(ip addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '^127\.' | head -1)
-    elif command -v ifconfig &> /dev/null; then
-        ip=$(ifconfig | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '^127\.' | head -1)
-    fi
-
-    if [ -n "$ip" ]; then
-        echo "[INFO] Found IP $ip using fallback method" >&2
-        echo "$ip"
-        return 0
-    fi
-
-    echo "[ERROR] Could not find a valid IP address" >&2
+    echo "[ERROR] Could not find a valid IP address on net0 interface" >&2
     return 1
 }
 
