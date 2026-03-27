@@ -1,3 +1,38 @@
+# Function to get node IP from NFS file
+# Usage: get_node_ip <node_name>
+# Returns: IP address or empty string if not found
+get_node_ip() {
+    local node_name=$1
+    local ip_file="$NFS_SHARED_DIR/${node_name}.ip"
+
+    if [ -f "$ip_file" ]; then
+        cat "$ip_file" | tr -d '[:space:]'
+    else
+        echo ""
+    fi
+}
+
+# Function to wait for node IP file to be available
+# Usage: wait_for_node_ip <node_name> [timeout_seconds]
+# Returns: 0 if IP found, 1 if timeout
+wait_for_node_ip() {
+    local node_name=$1
+    local timeout=${2:-60}
+    local ip_file="$NFS_SHARED_DIR/${node_name}.ip"
+    local start_time=$(date +%s)
+
+    while [ ! -f "$ip_file" ]; do
+        local elapsed_time=$(( $(date +%s) - start_time ))
+        if [ $elapsed_time -ge $timeout ]; then
+            echo "[ERROR] Timeout waiting for IP file: $ip_file" >&2
+            return 1
+        fi
+        sleep 1
+    done
+
+    return 0
+}
+
 ARCHITECTURE=${ARCHITECTURE:-"A"}
 
 if [ "$ARCHITECTURE" = "A" ]; then
@@ -185,38 +220,3 @@ echo "[INFO] SGLANG_DEEPEP_STATS_DIR: $SGLANG_DEEPEP_STATS_DIR"
 
 # NFS shared directory for node IP mapping
 NFS_SHARED_DIR=${NFS_SHARED_DIR:-"/nfs/shared"}
-
-# Function to get node IP from NFS file
-# Usage: get_node_ip <node_name>
-# Returns: IP address or empty string if not found
-get_node_ip() {
-    local node_name=$1
-    local ip_file="$NFS_SHARED_DIR/${node_name}.ip"
-
-    if [ -f "$ip_file" ]; then
-        cat "$ip_file" | tr -d '[:space:]'
-    else
-        echo ""
-    fi
-}
-
-# Function to wait for node IP file to be available
-# Usage: wait_for_node_ip <node_name> [timeout_seconds]
-# Returns: 0 if IP found, 1 if timeout
-wait_for_node_ip() {
-    local node_name=$1
-    local timeout=${2:-60}
-    local ip_file="$NFS_SHARED_DIR/${node_name}.ip"
-    local start_time=$(date +%s)
-
-    while [ ! -f "$ip_file" ]; do
-        local elapsed_time=$(( $(date +%s) - start_time ))
-        if [ $elapsed_time -ge $timeout ]; then
-            echo "[ERROR] Timeout waiting for IP file: $ip_file" >&2
-            return 1
-        fi
-        sleep 1
-    done
-
-    return 0
-}
