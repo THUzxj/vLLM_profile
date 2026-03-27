@@ -49,12 +49,17 @@ NFS_SHARED_DIR=${NFS_SHARED_DIR:-"/nfs/shared"}
 get_node_ip() {
     local node_name=$1
     local ip_file="$NFS_SHARED_DIR/${node_name}.ip"
+    local ip=""
 
     if [ -f "$ip_file" ]; then
-        cat "$ip_file" | tr -d '[:space:]'
+        ip=$(cat "$ip_file" | tr -d '[:space:]')
+        if [ -z "$ip" ]; then
+            echo "[WARN] get_node_ip: empty IP content for node $node_name (file: $ip_file)" >&2
+        fi
     else
-        echo ""
+        echo "[WARN] get_node_ip: IP file not found for node $node_name (file: $ip_file)" >&2
     fi
+    echo "$ip"
 }
 
 # Function to wait for node IP file to be available
@@ -309,6 +314,7 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
         echo "[INFO] DECODE_URL set to: $DECODE_URL"
     else
         echo "[WARN] Could not find decode IP for node $DECODE_NODE_NAME"
+        exit 1
     fi
 
     if [ -n "$PREFILL_IP" ]; then
@@ -316,6 +322,7 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
         echo "[INFO] PREFILL_URL set to: $PREFILL_URL"
     else
         echo "[WARN] Could not find prefill IP for node $PREFILL_NODE_NAME"
+        exit 1
     fi
 
     echo "[INFO] NODE_RANK is $NODE_RANK, running benchmark..."
