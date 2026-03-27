@@ -303,8 +303,14 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
     mkdir -p "$SGLANG_TORCH_PROFILER_DIR"
 
     # Get decode and prefill URLs from NFS files (first IP of each group)
-    DECODE_NODE_NAME="decode_0"
-    PREFILL_NODE_NAME="prefill_0"
+    # Use machine-index naming from register_node_ip.sh:
+    # - first prefill node: ${DLC_JOB_ID}-master-0 (rank 0)
+    # - first decode node:  ${DLC_JOB_ID}-worker-$((PREFILL_NODES - 1)) (rank PREFILL_NODES)
+    DLC_JOB_ID=${DLC_JOB_ID:-"test-job"}
+    PREFILL_NODES=${PREFILL_NODES:-1}
+    PREFILL_NODE_NAME="${DLC_JOB_ID}-master-0"
+    DECODE_FIRST_WORKER_NUM=$((PREFILL_NODES - 1))
+    DECODE_NODE_NAME="${DLC_JOB_ID}-worker-${DECODE_FIRST_WORKER_NUM}"
 
     DECODE_IP=$(get_node_ip "$DECODE_NODE_NAME")
     PREFILL_IP=$(get_node_ip "$PREFILL_NODE_NAME")
