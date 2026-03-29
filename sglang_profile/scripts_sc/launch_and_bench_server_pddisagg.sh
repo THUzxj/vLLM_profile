@@ -257,6 +257,7 @@ fi
 
 SERVER_LOG=$RESULT_DIR/server_rank${RANK}.log
 BENCH_LOG=$RESULT_DIR/bench_rank${RANK}.log
+ROUTER_LOG=$RESULT_DIR/router_rank${RANK}.log
 
 # Check if scripts exist
 if [ ! -f "$LAUNCH_SERVER_SCRIPT" ]; then
@@ -409,7 +410,7 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
             --pd-disaggregation \
             $ROUTER_PREFILL_ARGS \
             $ROUTER_DECODE_ARGS \
-            --policy $ROUTER_POLICY &
+            --policy $ROUTER_POLICY 2>&1 | tee "$ROUTER_LOG" &
         ROUTER_PID=$!
         echo "[INFO] Router started with PID $ROUTER_PID on port $ROUTER_PORT"
 
