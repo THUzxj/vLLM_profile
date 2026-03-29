@@ -405,6 +405,10 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
         echo "[INFO] Starting router with: prefill_nodes=$PREFILL_NODES, decode_nodes=$DECODE_NODES"
         echo "[INFO] Prefill IPs: ${PREFILL_IPS[@]}"
         echo "[INFO] Decode IPs: ${DECODE_IPS[@]}"
+
+        ROUTER_CMD="python3 -m sglang_router.launch_router --port 8000 --pd-disaggregation $ROUTER_PREFILL_ARGS $ROUTER_DECODE_ARGS --policy $ROUTER_POLICY"
+        echo "$ROUTER_CMD" > "$RESULT_DIR/router_cmd_rank${RANK}.txt"
+
         python3 -m sglang_router.launch_router \
             --port 8000 \
             --pd-disaggregation \
