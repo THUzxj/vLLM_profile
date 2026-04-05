@@ -105,17 +105,44 @@ BS=256 IL=1000 OL=100 \
 | `TARGET_DP_RANK` | 监控的 DP rank | 0 |
 | `DECODE_URL` / `PREFILL_URL` | PD 分离时的 URL | 空 |
 
-#### `bench_single_node_unified.sh`
-对单节点聚合服务器做多个 cached token length 的扫描测试。
+---
+
+### `bench_extend_decode/` 子目录
+
+用于测试 extend（有 KV cache 命中）场景下的 decode 性能，扫描不同 cached token length，比较extend与decode的时间比例。
+
+#### 服务器启动脚本
+
+| 脚本 | 说明 | 默认 GPU | 默认 DP/EP/TP |
+|------|------|---------|--------------|
+| `serve_single_node_aggregated.sh` | 单节点聚合模式，遍历配置数组启动 | 0,1 | 2/2/2 |
+| `serve_single_node_aggregated_4rank.sh` | 单节点聚合模式，4 GPU | 0,1,2,3 | 4/4/4 |
+| `serve_single_node_2p2d.sh` | 单节点 PD 分离，2 prefill + 2 decode | 0,1 / 2,3 | 2/2/2 |
+
+均 source `common_serve_args.sh`，默认模型 `Tongyi-DeepResearch-30B-A3B`，结果输出到 `results_v3/server/`。
+
+`serve_single_node_2p2d.sh` 额外启动 router（端口 8000，`cache_aware` 策略），prefill dist-init 127.0.0.1:29500，decode dist-init 127.0.0.1:29600。
+
+#### 基准测试脚本
+
+| 脚本 | 连接目标 | 结果目录 |
+|------|---------|---------|
+| `bench_single_node_aggregated.sh` | 单节点聚合服务器（端口 30000） | `results_single_node_unified/` |
+| `bench_single_node_2p2d.sh` | PD 分离 router（端口 8000） | `results_single_node_pd/` |
+
+两个脚本均调用 `bench_one_batch_server_058.py`，对 `CACHED_TOKEN_LENS` 列表中每个值循环测试：
 
 ```bash
+# 聚合模式
 BATCH_SIZE=4 OUTPUT_LEN=148 EXTEND_LEN=608 \
-  CACHED_TOKEN_LENS="1000 2000 4000 8000" \
-  bash bench_single_node_unified.sh
+  CACHED_TOKEN_LENS="1000 2000 4000 8000 16000 32000" \
+  bash bench_extend_decode/bench_single_node_aggregated.sh
+
+# PD 分离模式（需先启动 serve_single_node_2p2d.sh）
+BATCH_SIZE=4 bash bench_extend_decode/bench_single_node_2p2d.sh
 ```
 
-#### `bench_single_node_pd_2p2d.sh`
-对单节点 PD 分离服务器（router 在 8000 端口）做扫描测试，参数同上。
+每次测试的 `input_len = cached_len + EXTEND_LEN`，通过 `--cached-token-len` 传入 bench 程序触发 KV cache 预热。`bench_single_node_2p2d.sh` 额外传入 `--prefill-url` 和 `--decode-url` 用于 PD 分离模式的 server info 获取。
 
 ---
 
