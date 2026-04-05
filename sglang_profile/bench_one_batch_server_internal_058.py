@@ -155,6 +155,7 @@ class BenchArgs:
     append_to_github_summary: bool = True
     seed: int = 42
     cache_hit_rate: float = 0.0
+    cached_token_len: Optional[int] = None
     measure: bool = False
     profile_activities: Optional[List[str]] = None
     use_nsys: bool = False
@@ -246,6 +247,12 @@ class BenchArgs:
             "0.0 means no cache hits (flush all), 0.4 means 40%% of input tokens are cached.",
         )
         parser.add_argument(
+            "--cached-token-len",
+            type=int,
+            default=BenchArgs.cached_token_len,
+            help="Number of tokens to cache. If specified, overrides cache-hit-rate calculation.",
+        )
+        parser.add_argument(
             "--measure",
             action="store_true",
             default=BenchArgs.measure,
@@ -317,6 +324,8 @@ class BenchOneCaseResult(BaseModel):
     output_throughput: float
     overall_throughput: float
     last_ttft: float
+    tpot: float
+    decode_latency: float
     last_gen_throughput: float
     acc_length: float
     cache_hit_rate: Optional[float] = None
@@ -334,6 +343,8 @@ class BenchOneCaseResult(BaseModel):
                 "output_throughput": round(self.output_throughput, 2),
                 "overall_throughput": round(self.overall_throughput, 2),
                 "last_ttft": round(self.last_ttft, 4),
+                "tpot": round(self.tpot, 4),
+                "decode_latency": round(self.decode_latency, 4),
                 "last_gen_throughput": round(self.last_gen_throughput, 2),
                 "acc_length": round(self.acc_length, 2),
                 "cache_hit_rate": (
@@ -388,7 +399,8 @@ def _warmup_cache(
     input_len: int,
     cache_hit_rate: float,
     dataset_name: str = "random",
-    image_data: Optional[List] = None,
+    image_data: Optional[List[str]] = None,
+    cached_token_len: Optional[int] = None,
 ):
     """Warm up the cache by sending prefix tokens to populate the radix cache.
 
@@ -399,8 +411,11 @@ def _warmup_cache(
         cache_hit_rate: Fraction of input tokens to cache (0.0-1.0)
         dataset_name: Name of the dataset (used to determine if image data should be included)
         image_data: Optional image data for VLM models
+        cached_token_len: Optional explicit number of tokens to cache (overrides cache_hit_rate)
     """
-    cached_token_len = int(input_len * cache_hit_rate)
+    if cached_token_len is None:
+        cached_token_len = int(input_len * cache_hit_rate)
+
     if cached_token_len <= 0:
         return
 
@@ -418,6 +433,7 @@ def _warmup_cache(
             "ignore_eos": True,
         },
         "stream": False,
+        "log_metrics": False,
     }
     if dataset_name == "mmmu" and image_data is not None:
         # include image data in cache warmup
@@ -453,10 +469,12 @@ def run_one_case(
     dataset_path: str = BenchArgs.dataset_path,
     parallel_batch: bool = False,
     cache_hit_rate: float = BenchArgs.cache_hit_rate,
+    cached_token_len: Optional[int] = BenchArgs.cached_token_len,
     profile_activities: Optional[List[str]] = None,
     profile_stages: Optional[List[str]] = None,
     merge_profiles: bool = False,
     decode_url: Optional[str] = None,
+    log_metrics: bool = True,
 ):
     response = requests.post(url + "/flush_cache", timeout=DEFAULT_TIMEOUT)
     response.raise_for_status()
@@ -519,6 +537,7 @@ def run_one_case(
         },
         "return_logprob": return_logprob,
         "stream": True,
+        "log_metrics": log_metrics,
         **({"parallel_batch": parallel_batch} if parallel_batch else {}),
     }
     if dataset_name == "mmmu":
@@ -537,7 +556,7 @@ def run_one_case(
     num_requests = len(input_ids)
 
     # Warm up cache if cache_hit_rate > 0.0
-    if cache_hit_rate > 0.0:
+    if cache_hit_rate > 0.0 or cached_token_len:
         _warmup_cache(
             url=url,
             input_ids=input_ids,
@@ -545,7 +564,10 @@ def run_one_case(
             cache_hit_rate=cache_hit_rate,
             dataset_name=dataset_name,
             image_data=payload.get("image_data"),
+            cached_token_len=cached_token_len,
         )
+    else:
+        print("No cache warmup, cache_hit_rate is set to 0.0 or cached_token_len is not specified.")
 
     # Turn on profiler
     profile_link = None
@@ -620,8 +642,10 @@ def run_one_case(
     # Compute metrics
     latency = time.perf_counter() - tic
     input_throughput = batch_size * input_len / last_ttft
-    output_throughput = batch_size * output_len / (latency - last_ttft)
+    decode_latency = latency - last_ttft
+    output_throughput = batch_size * output_len / decode_latency
     overall_throughput = batch_size * (input_len + output_len) / latency
+    tpot = decode_latency / (output_len - 1) if output_len > 1 else 0.0
 
 
     effective_decode_url = decode_url if decode_url else url
@@ -645,6 +669,8 @@ def run_one_case(
     if output_len != 1:
         print(f"output throughput: {output_throughput:.2f} tok/s")
     print(f"last_ttft: {last_ttft:.2f} s")
+    print(f"decode_latency: {decode_latency:.2f} s")
+    print(f"TPOT: {tpot:.4f} s")
     print(f"last generation throughput: {last_gen_throughput:.2f} tok/s")
     if acc_length > 0:
         print(f"acc_length: {acc_length:.2f} ")
@@ -662,6 +688,8 @@ def run_one_case(
         output_throughput=output_throughput,
         overall_throughput=overall_throughput,
         last_ttft=last_ttft,
+        tpot=tpot,
+        decode_latency=decode_latency,
         last_gen_throughput=last_gen_throughput,
         acc_length=acc_length,
         cache_hit_rate=metrics_cache_hit_rate,
@@ -847,6 +875,7 @@ def run_benchmark_internal(
                 dataset_name=bench_args.dataset_name,
                 dataset_path=bench_args.dataset_path,
                 parallel_batch=bench_args.parallel_batch,
+                log_metrics=False,
             )
         print("=" * 8 + " Warmup End   " + "=" * 8 + "\n")
 
@@ -881,6 +910,7 @@ def run_benchmark_internal(
                         dataset_path=bench_args.dataset_path,
                         parallel_batch=bench_args.parallel_batch,
                         cache_hit_rate=bench_args.cache_hit_rate,
+                        cached_token_len=bench_args.cached_token_len,
                     )
                 )
 

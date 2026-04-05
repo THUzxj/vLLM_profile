@@ -58,7 +58,7 @@ LOG_ARGS="--decode-log-interval 1 --show-time-cost"
 ENABLE_DP_ATTENTION=${ENABLE_DP_ATTENTION:-1}
 
 if [ "$ENABLE_DP_ATTENTION" = 1 ]; then
-    DP_ATTENTION_ARGS="--enable-dp-attention"
+    DP_ATTENTION_ARGS="--enable-dp-attention --enable-dp-lm-head"
 else
     DP_ATTENTION_ARGS=""
 fi
