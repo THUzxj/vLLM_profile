@@ -44,6 +44,10 @@ DECODE_NODES=${DECODE_NODES:-1}
 TOTAL_PD_NODES=$((PREFILL_NODES + DECODE_NODES))
 MAX_RUNNING_REQUESTS_DECODE=${MAX_RUNNING_REQUESTS_DECODE:-256}
 
+# DeepGEMM pre-compilation configuration
+ENABLE_DEEPGEMM=${ENABLE_DEEPGEMM:-1}       # Set to 0 to skip DeepGEMM pre-compilation
+DEEPGEMM_COMPILE_RETRIES=${DEEPGEMM_COMPILE_RETRIES:-3}  # Max retry attempts
+
 # Router configuration (only started on rank 0)
 ROUTER_PORT=${ROUTER_PORT:-9001}
 ROUTER_POLICY=${ROUTER_POLICY:-"cache_aware"}
@@ -103,7 +107,9 @@ if [ -n "${ENABLE_NSYS_PROFILE:-}" ] && [ "${ENABLE_NSYS_PROFILE}" != "0" ]; the
     fi
 fi
 
-# Function to check if server is ready by polling the health endpoint
+# Function to check if server is ready by polling the health endpoint.
+# Also monitors the server PID (if SERVER_PID is set) so that an early
+# crash is detected immediately instead of waiting for the full timeout.
 check_server_ready() {
     local base_url="$1"
     local timeout="$2"
@@ -115,11 +121,15 @@ check_server_ready() {
     local elapsed=0
 
     while [ $elapsed -lt $timeout ]; do
+        # If the server process has already exited, abort immediately
+        if [ -n "${SERVER_PID:-}" ] && ! ps -p "$SERVER_PID" > /dev/null 2>&1; then
+            echo "[ERROR] Server process (PID $SERVER_PID) has exited unexpectedly while waiting for readiness"
+            return 1
+        fi
+
         if curl -s -f "${base_url}/health" > /dev/null 2>&1; then
             echo "[INFO] Server health check passed!"
             return 0
-        else
-            echo "[ERROR] Server health check failed!"
         fi
 
         sleep $interval
@@ -180,6 +190,72 @@ launch_and_wait_server() {
         bash "$server_script" 2>&1 | tee "$server_log"
         return $?
     fi
+}
+
+# Function to run DeepGEMM pre-compilation with retry logic.
+# Only runs when ARCHITECTURE=H and ENABLE_DEEPGEMM=1.
+# Runs $LAUNCH_SERVER_SCRIPT verbatim but with MODULE_NAME overridden to
+# "-m sglang.compile_deep_gemm", so every arg (--dp/--ep/--tp/
+# --moe-dense-tp-size/--enable-dp-attention/--context-length/
+# --disaggregation-mode/--nnodes/--node-rank/--dist-init-addr …)
+# is guaranteed to match the actual server launch exactly.
+# Detects success by checking for "DeepGEMM Kernels compilation finished
+# successfully." in the log produced by the launch script's tee.
+run_deepgemm_precompile() {
+    local log_dir="$1"
+    local retries="${DEEPGEMM_COMPILE_RETRIES:-3}"
+    local attempt=0
+    local success=0
+    # The launch script tees python output to $RESULT_DIR/run_node${RANK}.log
+    local compile_log="$log_dir/run_node${RANK:-0}.log"
+
+    echo "=========================================="
+    echo "[DeepGEMM] Starting pre-compilation (ARCHITECTURE=H)"
+    echo "[DeepGEMM] Launch script : $LAUNCH_SERVER_SCRIPT"
+    echo "[DeepGEMM] MODULE_NAME   : -m sglang.compile_deep_gemm"
+    echo "[DeepGEMM] Max retries   : $retries"
+    echo "[DeepGEMM] Compile log   : $compile_log"
+    echo "=========================================="
+
+    mkdir -p "$log_dir"
+
+    while [ $attempt -lt $retries ]; do
+        attempt=$((attempt + 1))
+        echo "[DeepGEMM] Attempt $attempt / $retries ..."
+
+        # Run the same launch script with MODULE_NAME replaced.
+        # RESULT_DIR is redirected to log_dir so the tee log lands there.
+        # ENABLE_NSYS_PROFILE=0 prevents nsys from wrapping the compile run.
+        local exit_code=0
+        MODULE_NAME="-m sglang.compile_deep_gemm" \
+        RESULT_DIR="$log_dir" \
+        ENABLE_NSYS_PROFILE=0 \
+        bash "$LAUNCH_SERVER_SCRIPT" || exit_code=$?
+
+        # Check log for success marker written by compile_deep_gemm
+        if grep -q "DeepGEMM Kernels compilation finished successfully\." "$compile_log" 2>/dev/null; then
+            echo "[DeepGEMM] Pre-compilation succeeded on attempt $attempt."
+            success=1
+            break
+        fi
+
+        if [ $exit_code -ne 0 ]; then
+            echo "[DeepGEMM] Compilation process exited with code $exit_code on attempt $attempt."
+        else
+            echo "[DeepGEMM] Process exited 0 but success marker not found in log (attempt $attempt)."
+        fi
+
+        if [ $attempt -lt $retries ]; then
+            echo "[DeepGEMM] Retrying in 10 seconds..."
+            sleep 10
+        fi
+    done
+
+    if [ $success -eq 0 ]; then
+        echo "[ERROR] DeepGEMM pre-compilation failed after $retries attempt(s). Aborting."
+        return 1
+    fi
+    return 0
 }
 
 # Main script
@@ -282,6 +358,23 @@ echo "=========================================="
 
 # Create result directory
 mkdir -p "$RESULT_DIR"
+
+# DeepGEMM pre-compilation (only on Architecture H, before launching server)
+if [ "$ARCHITECTURE" = "H" ] && [ "${ENABLE_DEEPGEMM:-1}" -eq 1 ]; then
+    DEEPGEMM_LOG_DIR="$RESULT_DIR/deepgemm_compile_rank${NODE_RANK}"
+    echo "[INFO] Architecture=H: running DeepGEMM pre-compilation on node rank ${NODE_RANK}..."
+    if ! run_deepgemm_precompile "$DEEPGEMM_LOG_DIR"; then
+        echo "[ERROR] DeepGEMM pre-compilation failed, cannot proceed to launch server."
+        exit 1
+    fi
+    echo "[INFO] DeepGEMM pre-compilation complete, proceeding to server launch."
+else
+    if [ "$ARCHITECTURE" != "H" ]; then
+        echo "[INFO] Architecture=$ARCHITECTURE: skipping DeepGEMM pre-compilation (only needed for H)."
+    else
+        echo "[INFO] ENABLE_DEEPGEMM=0: skipping DeepGEMM pre-compilation."
+    fi
+fi
 
 # Determine server and bench result directories
 SERVER_RESULT_DIR="$RESULT_DIR/server"
@@ -425,14 +518,55 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
     # fi
 
     echo "[INFO] NODE_RANK is $NODE_RANK, running benchmark..."
+
+    # Monitor server health in the background while bench is running.
+    # If the server process dies during the benchmark, write a sentinel file
+    # and kill the bench sub-processes so the main script does not hang.
+    SERVER_DIED_FLAG="$RESULT_DIR/.server_died_rank${NODE_RANK}"
+    rm -f "$SERVER_DIED_FLAG"
+    (
+        while true; do
+            sleep 5
+            if [ -n "${SERVER_PID:-}" ] && ! ps -p "$SERVER_PID" > /dev/null 2>&1; then
+                echo "[ERROR] Server process (PID $SERVER_PID) died during benchmark!" >&2
+                touch "$SERVER_DIED_FLAG"
+                # Interrupt children of this shell (bench + tee) so tee/bench exit
+                pkill -TERM -P $$ 2>/dev/null || true
+                break
+            fi
+        done
+    ) &
+    SERVER_MONITOR_PID=$!
+
     bash "$BENCH_SCRIPT" 2>&1 | tee "$BENCH_LOG"
     BENCH_EXIT_CODE=$?
+
+    # Stop the monitor
+    kill "$SERVER_MONITOR_PID" 2>/dev/null || true
+    wait "$SERVER_MONITOR_PID" 2>/dev/null || true
+
+    # If the server died during the benchmark, treat it as a failure
+    if [ -f "$SERVER_DIED_FLAG" ]; then
+        echo "[ERROR] Server exited abnormally during benchmark run."
+        rm -f "$SERVER_DIED_FLAG"
+        BENCH_EXIT_CODE=1
+    fi
 
     sleep 10
 
     # Kill server process
     echo "[INFO] Stopping server..."
     echo "[INFO] Server PID: $SERVER_PID"
+
+    # Collect server exit code in case it already exited on its own
+    SERVER_EXIT_CODE=0
+    if [ -n "${SERVER_PID:-}" ] && ! ps -p "$SERVER_PID" > /dev/null 2>&1; then
+        wait "$SERVER_PID" 2>/dev/null
+        SERVER_EXIT_CODE=$?
+        if [ $SERVER_EXIT_CODE -ne 0 ]; then
+            echo "[ERROR] Server process (PID $SERVER_PID) had already exited with code $SERVER_EXIT_CODE"
+        fi
+    fi
 
     # Kill the process group (including child processes)
     if kill -0 -$SERVER_PID 2>/dev/null; then
@@ -461,25 +595,31 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
         pkill -9 -f "python.*sglang" 2>/dev/null || true
     fi
 
-    # Wait for the process to finish (non-blocking if already exited)
-    # wait $SERVER_PID 2>/dev/null || true
-
-    echo "Force exit"
-    exit 1
+    # Reap the server process
+    wait $SERVER_PID 2>/dev/null || true
 
     echo "[INFO] Server stop complete"
 
-    if [ $BENCH_EXIT_CODE -eq 0 ]; then
-        echo "[SUCCESS] Benchmark completed successfully"
-    else
+    # Determine final exit code: fail if either bench or server failed
+    FINAL_EXIT_CODE=0
+    if [ $BENCH_EXIT_CODE -ne 0 ]; then
         echo "[ERROR] Benchmark failed with exit code: $BENCH_EXIT_CODE"
-        # exit $BENCH_EXIT_CODE
-        exit 1
+        FINAL_EXIT_CODE=$BENCH_EXIT_CODE
+    fi
+    if [ ${SERVER_EXIT_CODE:-0} -ne 0 ]; then
+        echo "[ERROR] Server exited with code: $SERVER_EXIT_CODE"
+        FINAL_EXIT_CODE=$SERVER_EXIT_CODE
+    fi
+
+    if [ $FINAL_EXIT_CODE -eq 0 ]; then
+        echo "[SUCCESS] Benchmark completed successfully"
     fi
 
     echo "=========================================="
     echo "Workflow completed!"
     echo "=========================================="
+
+    exit $FINAL_EXIT_CODE
 
 else
     echo "[INFO] NODE_RANK is $NODE_RANK, skipping benchmark (only rank 0 runs benchmark)"
