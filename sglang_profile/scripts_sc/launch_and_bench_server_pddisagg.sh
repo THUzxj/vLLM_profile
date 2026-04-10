@@ -47,6 +47,7 @@ MAX_RUNNING_REQUESTS_DECODE=${MAX_RUNNING_REQUESTS_DECODE:-256}
 # DeepGEMM pre-compilation configuration
 ENABLE_DEEPGEMM=${ENABLE_DEEPGEMM:-1}       # Set to 0 to skip DeepGEMM pre-compilation
 DEEPGEMM_COMPILE_RETRIES=${DEEPGEMM_COMPILE_RETRIES:-3}  # Max retry attempts
+DEEPGEMM_COMPILE_TIMEOUT_SECONDS=${DEEPGEMM_COMPILE_TIMEOUT_SECONDS:-1800}  # 30 minutes
 
 # Router configuration (only started on rank 0)
 ROUTER_PORT=${ROUTER_PORT:-8998}
@@ -204,6 +205,7 @@ launch_and_wait_server() {
 run_deepgemm_precompile() {
     local log_dir="$1"
     local retries="${DEEPGEMM_COMPILE_RETRIES:-3}"
+    local timeout_seconds="${DEEPGEMM_COMPILE_TIMEOUT_SECONDS:-1800}"
     local attempt=0
     local success=0
     # Use the same log naming convention as the launch script.
@@ -214,6 +216,7 @@ run_deepgemm_precompile() {
     echo "[DeepGEMM] Launch script : $LAUNCH_SERVER_SCRIPT"
     echo "[DeepGEMM] MODULE_NAME   : -m sglang.compile_deep_gemm"
     echo "[DeepGEMM] Max retries   : $retries"
+    echo "[DeepGEMM] Timeout (sec): $timeout_seconds"
     echo "[DeepGEMM] Compile log   : $compile_log"
     echo "=========================================="
 
@@ -227,11 +230,21 @@ run_deepgemm_precompile() {
         # RESULT_DIR is redirected to log_dir so the tee log lands there.
         # ENABLE_NSYS_PROFILE=0 prevents nsys from wrapping the compile run.
         local exit_code=0
-        MODULE_NAME="-m sglang.compile_deep_gemm" \
-        RESULT_DIR="$log_dir" \
-        LOG_FILENAME="$compile_log" \
-        ENABLE_NSYS_PROFILE=0 \
-        bash "$LAUNCH_SERVER_SCRIPT" || exit_code=$?
+        if command -v timeout >/dev/null 2>&1; then
+            MODULE_NAME="-m sglang.compile_deep_gemm" \
+            RESULT_DIR="$log_dir" \
+            LOG_FILENAME="$compile_log" \
+            ENABLE_NSYS_PROFILE=0 \
+            timeout --signal=TERM --kill-after=30s "${timeout_seconds}s" \
+                bash "$LAUNCH_SERVER_SCRIPT" || exit_code=$?
+        else
+            echo "[WARN] 'timeout' command not found, running compile without hard timeout."
+            MODULE_NAME="-m sglang.compile_deep_gemm" \
+            RESULT_DIR="$log_dir" \
+            LOG_FILENAME="$compile_log" \
+            ENABLE_NSYS_PROFILE=0 \
+            bash "$LAUNCH_SERVER_SCRIPT" || exit_code=$?
+        fi
 
         # Check log for success marker written by compile_deep_gemm
         if grep -q "DeepGEMM Kernels compilation finished successfully\." "$compile_log" 2>/dev/null; then
@@ -240,7 +253,9 @@ run_deepgemm_precompile() {
             break
         fi
 
-        if [ $exit_code -ne 0 ]; then
+        if [ $exit_code -eq 124 ] || [ $exit_code -eq 137 ]; then
+            echo "[DeepGEMM] Compilation timed out after ${timeout_seconds}s on attempt $attempt."
+        elif [ $exit_code -ne 0 ]; then
             echo "[DeepGEMM] Compilation process exited with code $exit_code on attempt $attempt."
         else
             echo "[DeepGEMM] Process exited 0 but success marker not found in log (attempt $attempt)."
