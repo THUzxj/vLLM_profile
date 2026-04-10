@@ -345,8 +345,18 @@ cleanup_sync_file() {
     fi
 }
 
+cleanup_child_processes() {
+    local self_pid="$$"
+    echo "[INFO] Cleaning up child processes of script PID ${self_pid}..."
+    pkill -TERM -P "$self_pid" 2>/dev/null || true
+    sleep 5
+    pkill -KILL -P "$self_pid" 2>/dev/null || true
+    wait 2>/dev/null || true
+}
+
 cleanup_on_exit() {
     stop_router
+    cleanup_child_processes
     cleanup_sync_file
 }
 trap cleanup_on_exit EXIT
