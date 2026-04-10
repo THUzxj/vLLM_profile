@@ -269,6 +269,8 @@ class ProfileTriggerThread(threading.Thread):
         self._stop_event = threading.Event()
         self.profile_link: Optional[str] = None
         self.profile_started = False
+        self.trigger_attempted = False
+        self.trigger_succeeded = False
         self.profile_error: Optional[str] = None
         self.running_requests_history: List[int] = []
 
@@ -308,6 +310,7 @@ class ProfileTriggerThread(threading.Thread):
                         print(f"[ProfileTriggerThread] Running requests ({running_reqs}) >= "
                               f"threshold ({trigger_count}) for {consecutive_hits} times. "
                               f"Starting profile (rank: {{{label_str}}})...")
+                        self.trigger_attempted = True
 
                         # Add optional delay before profiling
                         if self.profile_delay_steps > 0:
@@ -329,9 +332,11 @@ class ProfileTriggerThread(threading.Thread):
                                 profile_stages=self.profile_stages,
                             )
                             self.profile_started = True
+                            self.trigger_succeeded = True
                             print(f"[ProfileTriggerThread] Profile started successfully. Output: {self.profile_link}")
                         except Exception as e:
                             self.profile_error = str(e)
+                            self.trigger_succeeded = False
                             print(f"[ProfileTriggerThread] Failed to start profile: {e}")
                 else:
                     consecutive_hits = 0
@@ -349,6 +354,10 @@ class ProfileTriggerThread(threading.Thread):
     def get_running_requests_history(self) -> List[int]:
         """Get the history of running requests counts."""
         return self.running_requests_history
+
+    def is_trigger_succeeded(self) -> bool:
+        """Check if profiling trigger succeeded."""
+        return self.trigger_succeeded
 
 
 class RequestSenderThread(threading.Thread):
@@ -728,6 +737,7 @@ class BenchArgs:
     send_interval: float = 5.0  # Interval between sending batches (seconds)
     total_rounds: int = 1  # Total number of rounds to send batches (0 = infinite until profile done)
     wait_for_profile: bool = True  # Whether to wait for profile to complete before stopping
+    max_profile_retries_if_not_triggered: int = 2  # Additional retries when trigger is not successful
     # Update max_running_requests before profiling
     update_max_running_reqs: bool = True
     max_running_reqs_update_retries: int = 30
@@ -904,6 +914,12 @@ class BenchArgs:
             help="Wait for profile to complete before stopping request sender. Default: True.",
         )
         parser.add_argument(
+            "--max-profile-retries-if-not-triggered",
+            type=int,
+            default=BenchArgs.max_profile_retries_if_not_triggered,
+            help="Additional retries for the same batch size when profile trigger is not successful. Default: 2.",
+        )
+        parser.add_argument(
             "--update-max-running-reqs",
             action="store_true",
             default=BenchArgs.update_max_running_reqs,
@@ -967,6 +983,7 @@ class BenchOneCaseResult(BaseModel):
     acc_length: float
     cache_hit_rate: Optional[float] = None
     profile_link: Optional[str] = None
+    profile_triggered: bool = False
 
     def dump_to_jsonl(self, result_filename: str):
         with open(result_filename, "a") as fout:
@@ -987,6 +1004,7 @@ class BenchOneCaseResult(BaseModel):
                     if self.cache_hit_rate is not None
                     else None
                 ),
+                "profile_triggered": self.profile_triggered,
             }
             fout.write(json.dumps(res) + "\n")
 
@@ -1533,6 +1551,7 @@ def run_one_case_with_metrics_trigger(
     # Collect results
     request_stats = request_sender_thread.get_stats()
     profile_link = profile_trigger_thread.get_profile_link()
+    profile_triggered = profile_trigger_thread.is_trigger_succeeded()
     running_requests_history = profile_trigger_thread.get_running_requests_history()
 
     # Get server info
@@ -1569,6 +1588,7 @@ def run_one_case_with_metrics_trigger(
         print(f"  Accept length: {acc_length:.2f}")
     if profile_link:
         print(f"  Profile output: {profile_link}")
+    print(f"  Profile trigger succeeded: {profile_triggered}")
     if running_requests_history:
         print(f"  Running requests history (last 10): {running_requests_history[-10:]}")
     if request_stats["errors"]:
@@ -1591,11 +1611,17 @@ def run_one_case_with_metrics_trigger(
         acc_length=acc_length,
         cache_hit_rate=None,  # Not calculated in metrics-triggered mode
         profile_link=profile_link,
+        profile_triggered=profile_triggered,
     )
 
     # Save results
-    if result_filename:
+    if result_filename and profile_triggered:
         result.dump_to_jsonl(result_filename)
+    elif result_filename and not profile_triggered:
+        print(
+            "[run_one_case_with_metrics_trigger] Profile was not triggered successfully. "
+            "Skip writing this attempt to result file."
+        )
 
     return result
 
@@ -1817,6 +1843,7 @@ def run_benchmark_internal(
         # Profile all cases
         if bench_args.profile:
             try:
+                max_profile_retries = max(0, bench_args.max_profile_retries_if_not_triggered)
                 for bs, il, ol in itertools.product(
                     bench_args.batch_size, bench_args.input_len, bench_args.output_len
                 ):
@@ -1829,8 +1856,14 @@ def run_benchmark_internal(
                     profile_prefix = (
                         bench_args.profile_prefix or ""
                     ) + f"bs-{bs}-il-{il}"
-                    profile_results.append(
-                        run_one_case_with_metrics_trigger(
+
+                    prof_res = None
+                    for attempt in range(max_profile_retries + 1):
+                        print(
+                            f"[profile-retry] Profiling bs={bs}, il={il}, ol={ol}, "
+                            f"attempt={attempt + 1}/{max_profile_retries + 1}"
+                        )
+                        prof_res = run_one_case_with_metrics_trigger(
                             url=base_url,
                             batch_size=bs,
                             input_len=il,
@@ -1865,7 +1898,20 @@ def run_benchmark_internal(
                             max_running_reqs_update_retries=bench_args.max_running_reqs_update_retries,
                             requests_per_batch_multiplier=bench_args.requests_per_batch_multiplier,
                         )
-                    )
+                        if prof_res.profile_triggered:
+                            profile_results.append(prof_res)
+                            break
+
+                        if attempt < max_profile_retries:
+                            print(
+                                f"[profile-retry] Profile trigger not successful for bs={bs}, il={il}, ol={ol}. "
+                                "Retrying same batch size..."
+                            )
+                        else:
+                            print(
+                                f"[profile-retry] Skip bs={bs}, il={il}, ol={ol} after "
+                                f"{max_profile_retries + 1} attempts because profile trigger was not successful."
+                            )
             except Exception as e:
                 print(f"Error profiling, some profile traces may not be dumped: {e}")
 
