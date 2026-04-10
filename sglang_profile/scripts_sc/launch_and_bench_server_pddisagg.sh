@@ -641,7 +641,9 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
     echo "Workflow completed!"
     echo "=========================================="
 
-    exit $FINAL_EXIT_CODE
+    # Fix to exit 1 to let all the nodes in the job stop
+    exit 1
+    # exit $FINAL_EXIT_CODE
 
 else
     echo "[INFO] NODE_RANK is $NODE_RANK, skipping benchmark (only rank 0 runs benchmark)"
