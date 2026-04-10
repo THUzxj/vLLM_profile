@@ -52,6 +52,7 @@ DEEPGEMM_COMPILE_TIMEOUT_SECONDS=${DEEPGEMM_COMPILE_TIMEOUT_SECONDS:-1800}  # 30
 # Router configuration (only started on rank 0)
 ROUTER_PORT=${ROUTER_PORT:-8998}
 ROUTER_POLICY=${ROUTER_POLICY:-"cache_aware"}
+ROUTER_PID=""
 
 
 # NFS shared directory for node IP mapping
@@ -95,6 +96,45 @@ wait_for_node_ip() {
     done
 
     return 0
+}
+
+stop_router() {
+    if [ -z "${ROUTER_PID:-}" ]; then
+        return 0
+    fi
+
+    # Router is launched via a background pipeline; stop by process group when possible.
+    if ps -p "$ROUTER_PID" > /dev/null 2>&1; then
+        echo "[INFO] Stopping router..."
+        if kill -0 -"$ROUTER_PID" 2>/dev/null; then
+            kill -TERM -"$ROUTER_PID" 2>/dev/null || true
+        else
+            kill -TERM "$ROUTER_PID" 2>/dev/null || true
+        fi
+
+        ROUTER_STOPPED=0
+        for i in {1..10}; do
+            if ! ps -p "$ROUTER_PID" > /dev/null 2>&1; then
+                ROUTER_STOPPED=1
+                echo "[INFO] Router stopped gracefully"
+                break
+            fi
+            sleep 1
+        done
+
+        if [ "$ROUTER_STOPPED" -eq 0 ]; then
+            echo "[WARNING] Router did not stop gracefully, forcing kill..."
+            if kill -0 -"$ROUTER_PID" 2>/dev/null; then
+                kill -KILL -"$ROUTER_PID" 2>/dev/null || true
+            else
+                kill -KILL "$ROUTER_PID" 2>/dev/null || true
+            fi
+            pkill -9 -f "python3 -m sglang_router.launch_router.*--port ${ROUTER_PORT}" 2>/dev/null || true
+        fi
+    fi
+
+    wait "$ROUTER_PID" 2>/dev/null || true
+    ROUTER_PID=""
 }
 
 # Only allow Nsight Systems profiling on rank 0
@@ -304,7 +344,12 @@ cleanup_sync_file() {
         echo "[INFO] Node 0: sync file removed"
     fi
 }
-trap cleanup_sync_file EXIT
+
+cleanup_on_exit() {
+    stop_router
+    cleanup_sync_file
+}
+trap cleanup_on_exit EXIT
 
 # Optional hard override: if RESULT_DIR_FIXED is set, always use it and skip sync/default logic.
 # This is useful when launching from different nodes without coordinating environment variables.
@@ -575,6 +620,9 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
     fi
 
     sleep 10
+
+    # Kill router process
+    stop_router
 
     # Kill server process
     echo "[INFO] Stopping server..."
