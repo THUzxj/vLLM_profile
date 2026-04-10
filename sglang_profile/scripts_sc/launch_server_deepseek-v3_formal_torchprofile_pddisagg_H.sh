@@ -42,6 +42,7 @@ if [ -z "$RESULT_DIR" ]; then
 fi
 mkdir -p "$RESULT_DIR"
 
+LOG_FILENAME=${LOG_FILENAME:-"$RESULT_DIR/run_node${RANK}_BS${MAX_RUNNING_REQUESTS_DECODE}_${DATE}.log"}
 RESULT_FILENAME="$RESULT_DIR/result.log"
 
 # Build router arguments and start router on rank 0 before server
@@ -83,7 +84,7 @@ ${PROFILE_PREFIX}python $MODULE_NAME \
     $MEM_ARGS \
     "${LONG_CONTEXT_ARGS[@]}" \
     $EPLB_ARGS $EXPERT_DISTRIBUTION_METRICS_ARGS \
-    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS $ADD_ARGS 2>&1 | tee $RESULT_DIR/run_node$RANK.log 
+    $LOG_ARGS $MULTI_NODE_ARGS $METRICS_ARGS $TBO_ARGS $CUDA_GRAPH_ARGS $ADD_ARGS 2>&1 | tee "$LOG_FILENAME"
 set +x
 
 BENCH_EXIT_CODE=$?

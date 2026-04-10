@@ -49,7 +49,7 @@ ENABLE_DEEPGEMM=${ENABLE_DEEPGEMM:-1}       # Set to 0 to skip DeepGEMM pre-comp
 DEEPGEMM_COMPILE_RETRIES=${DEEPGEMM_COMPILE_RETRIES:-3}  # Max retry attempts
 
 # Router configuration (only started on rank 0)
-ROUTER_PORT=${ROUTER_PORT:-9001}
+ROUTER_PORT=${ROUTER_PORT:-8998}
 ROUTER_POLICY=${ROUTER_POLICY:-"cache_aware"}
 
 
@@ -206,8 +206,8 @@ run_deepgemm_precompile() {
     local retries="${DEEPGEMM_COMPILE_RETRIES:-3}"
     local attempt=0
     local success=0
-    # The launch script tees python output to $RESULT_DIR/run_node${RANK}.log
-    local compile_log="$log_dir/run_node${RANK:-0}.log"
+    # Use the same log naming convention as the launch script.
+    local compile_log="$log_dir/run_node${RANK:-0}_BS${MAX_RUNNING_REQUESTS_DECODE}_${DATE}.log"
 
     echo "=========================================="
     echo "[DeepGEMM] Starting pre-compilation (ARCHITECTURE=H)"
@@ -229,6 +229,7 @@ run_deepgemm_precompile() {
         local exit_code=0
         MODULE_NAME="-m sglang.compile_deep_gemm" \
         RESULT_DIR="$log_dir" \
+        LOG_FILENAME="$compile_log" \
         ENABLE_NSYS_PROFILE=0 \
         bash "$LAUNCH_SERVER_SCRIPT" || exit_code=$?
 
@@ -499,20 +500,26 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
         echo "[INFO] Prefill IPs: ${PREFILL_IPS[@]}"
         echo "[INFO] Decode IPs: ${DECODE_IPS[@]}"
 
+        ROUTER_STARTUP_DELAY=${ROUTER_STARTUP_DELAY:-10}
+        echo "[INFO] Waiting ${ROUTER_STARTUP_DELAY}s for router to be ready..."
+        sleep $ROUTER_STARTUP_DELAY
+
         ROUTER_CMD="python3 -m sglang_router.launch_router --port 8000 --pd-disaggregation $ROUTER_PREFILL_ARGS $ROUTER_DECODE_ARGS --policy $ROUTER_POLICY"
         echo "$ROUTER_CMD" > "$RESULT_DIR/router_cmd_rank${RANK}.txt"
 
+
+        set -x
         python3 -m sglang_router.launch_router \
             --port 8000 \
             --pd-disaggregation \
             $ROUTER_PREFILL_ARGS \
             $ROUTER_DECODE_ARGS \
             --policy $ROUTER_POLICY 2>&1 | tee "$ROUTER_LOG" &
+        set +x
         ROUTER_PID=$!
         echo "[INFO] Router started with PID $ROUTER_PID on port $ROUTER_PORT"
 
         # Wait for router to be ready
-        ROUTER_STARTUP_DELAY=${ROUTER_STARTUP_DELAY:-5}
         echo "[INFO] Waiting ${ROUTER_STARTUP_DELAY}s for router to be ready..."
         sleep $ROUTER_STARTUP_DELAY
     # fi
@@ -625,4 +632,3 @@ else
     echo "[INFO] NODE_RANK is $NODE_RANK, skipping benchmark (only rank 0 runs benchmark)"
     BENCH_EXIT_CODE=0
 fi
-
