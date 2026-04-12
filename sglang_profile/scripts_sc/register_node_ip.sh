@@ -7,6 +7,7 @@ DLC_JOB_ID=${DLC_JOB_ID:-"test-job"}
 NODE_TYPE=${NODE_TYPE:-"worker"}  # master or worker
 NODE_RANK=${NODE_RANK:-0}
 TIMEOUT=${TIMEOUT:-300}  # Wait up to 300 seconds for network interface
+INTERFACES=${INTERFACES:-"net0"}  # Candidate interfaces, comma/space separated
 
 # Function to get node name
 get_node_name() {
@@ -29,6 +30,7 @@ echo "DLC_JOB_ID: $DLC_JOB_ID"
 echo "NODE_TYPE: $NODE_TYPE"
 echo "NODE_RANK: $NODE_RANK"
 echo "NODE_NAME: $NODE_NAME"
+echo "INTERFACES: $INTERFACES"
 echo "=========================================="
 
 # Create NFS shared directory if it doesn't exist
@@ -52,10 +54,21 @@ get_ip_address() {
 
 # Try to get IP address from common network interfaces
 get_ip_from_interfaces() {
-    local interfaces=("net0")
+    local interfaces=()
+    local interfaces_str="$INTERFACES"
     local ip=""
     local ip_cmd_available=false
     local ifconfig_cmd_available=false
+
+    # Support both comma and space separators.
+    interfaces_str="${interfaces_str//,/ }"
+    for iface in $interfaces_str; do
+        interfaces+=("$iface")
+    done
+
+    if [ ${#interfaces[@]} -eq 0 ]; then
+        interfaces=("net0")
+    fi
 
     # Check which commands are available
     if command -v ip &> /dev/null; then
@@ -93,7 +106,7 @@ get_ip_from_interfaces() {
         fi
     done
 
-    echo "[ERROR] Could not find a valid IP address on net0 interface" >&2
+    echo "[ERROR] Could not find a valid IP address on interfaces: ${interfaces[*]}" >&2
     return 1
 }
 

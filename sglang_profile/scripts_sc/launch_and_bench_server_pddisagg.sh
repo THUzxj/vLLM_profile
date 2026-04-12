@@ -28,7 +28,7 @@ fi
 # Configuration
 SERVER_READY_TIMEOUT=32000  # Maximum wait time in seconds
 SERVER_READY_CHECK_INTERVAL=2  # Check interval in seconds
-BASE_URL="http://127.0.0.1:30000"
+SERVER_READY_URL=${SERVER_READY_URL:-"http://127.0.0.1:30000"}
 MODEL_PATH=${MODEL_PATH:-"/nfs/xjzhang/Qwen/Qwen3-235B-A22B-1layer-new2"}
 MODEL_NAME=${MODEL_PATH##*/}
 NODE_RANK=${RANK:-0}
@@ -53,6 +53,9 @@ DEEPGEMM_COMPILE_TIMEOUT_SECONDS=${DEEPGEMM_COMPILE_TIMEOUT_SECONDS:-1800}  # 30
 ROUTER_PORT=${ROUTER_PORT:-8998}
 ROUTER_POLICY=${ROUTER_POLICY:-"cache_aware"}
 ROUTER_PID=""
+SERVER_PGID=""
+SKIP_INTERNAL_ROUTER=${SKIP_INTERNAL_ROUTER:-0}
+EXIT_WITH_ERROR_TO_STOP_JOB=${EXIT_WITH_ERROR_TO_STOP_JOB:-1}
 
 
 # NFS shared directory for node IP mapping
@@ -215,9 +218,13 @@ launch_and_wait_server() {
         } &
         SERVER_PID=$!
         echo "[INFO] Server process started with PID: $SERVER_PID"
+        SERVER_PGID=$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d '[:space:]' || true)
+        if [ -n "${SERVER_PGID:-}" ]; then
+            echo "[INFO] Server process group ID: $SERVER_PGID"
+        fi
 
         # Wait for server to be ready
-        if ! check_server_ready "$BASE_URL" $timeout $interval; then
+        if ! check_server_ready "$SERVER_READY_URL" $timeout $interval; then
             echo "[ERROR] Failed to detect server ready state"
             kill $SERVER_PID 2>/dev/null || true
             wait $SERVER_PID 2>/dev/null || true
@@ -476,123 +483,132 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
     export SGLANG_TORCH_PROFILER_DIR="$BENCH_RESULT_DIR/torch_profile"
     mkdir -p "$SGLANG_TORCH_PROFILER_DIR"
 
-    # Get decode and prefill URLs from NFS files (first IP of each group)
-    # Use machine-index naming from register_node_ip.sh:
-    # - first prefill node: ${DLC_JOB_ID}-master-0 (rank 0)
-    # - first decode node:  ${DLC_JOB_ID}-worker-$((PREFILL_NODES - 1)) (rank PREFILL_NODES, worker_num = rank - 1)
-    DLC_JOB_ID=${DLC_JOB_ID:-"test-job"}
-    PREFILL_NODE_NAME="${DLC_JOB_ID}-master-0"
-    DECODE_FIRST_RANK=$PREFILL_NODES
-    DECODE_FIRST_WORKER_NUM=$((DECODE_FIRST_RANK - 1))
-    DECODE_NODE_NAME="${DLC_JOB_ID}-worker-${DECODE_FIRST_WORKER_NUM}"
-
-    DECODE_IP=$(get_node_ip "$DECODE_NODE_NAME")
-    PREFILL_IP=$(get_node_ip "$PREFILL_NODE_NAME")
-
-    if [ -n "$DECODE_IP" ]; then
-        export DECODE_URL="http://${DECODE_IP}:30000"
-        echo "[INFO] DECODE_URL set to: $DECODE_URL"
+    if [ "${SKIP_INTERNAL_ROUTER:-0}" = "1" ]; then
+        # Single-node fast path: router is launched by external server script.
+        export PREFILL_URL=${PREFILL_URL:-"http://127.0.0.1:30000"}
+        export DECODE_URL=${DECODE_URL:-"http://127.0.0.1:30001"}
+        echo "[INFO] SKIP_INTERNAL_ROUTER=1, skipping NFS IP discovery and internal router launch"
+        echo "[INFO] Using PREFILL_URL=$PREFILL_URL"
+        echo "[INFO] Using DECODE_URL=$DECODE_URL"
     else
-        echo "[WARN] Could not find decode IP for node $DECODE_NODE_NAME"
-    fi
+        # Get decode and prefill URLs from NFS files (first IP of each group)
+        # Use machine-index naming from register_node_ip.sh:
+        # - first prefill node: ${DLC_JOB_ID}-master-0 (rank 0)
+        # - first decode node:  ${DLC_JOB_ID}-worker-$((PREFILL_NODES - 1)) (rank PREFILL_NODES, worker_num = rank - 1)
+        DLC_JOB_ID=${DLC_JOB_ID:-"test-job"}
+        PREFILL_NODE_NAME="${DLC_JOB_ID}-master-0"
+        DECODE_FIRST_RANK=$PREFILL_NODES
+        DECODE_FIRST_WORKER_NUM=$((DECODE_FIRST_RANK - 1))
+        DECODE_NODE_NAME="${DLC_JOB_ID}-worker-${DECODE_FIRST_WORKER_NUM}"
 
-    if [ -n "$PREFILL_IP" ]; then
-        export PREFILL_URL="http://${PREFILL_IP}:30000"
-        echo "[INFO] PREFILL_URL set to: $PREFILL_URL"
-    else
-        echo "[WARN] Could not find prefill IP for node $PREFILL_NODE_NAME"
-    fi
+        DECODE_IP=$(get_node_ip "$DECODE_NODE_NAME")
+        PREFILL_IP=$(get_node_ip "$PREFILL_NODE_NAME")
 
-    # Start router if PD disaggregation is enabled
-    # if [ "${ENABLE_PD_DISAGG:-0}" -eq 1 ]; then
-        echo "[INFO] PD disaggregation mode enabled, starting router..."
+        if [ -n "$DECODE_IP" ]; then
+            export DECODE_URL="http://${DECODE_IP}:30000"
+            echo "[INFO] DECODE_URL set to: $DECODE_URL"
+        else
+            echo "[WARN] Could not find decode IP for node $DECODE_NODE_NAME"
+        fi
 
-        # Wait for IP files and get prefill node IPs
-        PREFILL_IPS=()
-        for i in $(seq 0 $((PREFILL_NODES - 1))); do
-            if [ $i -eq 0 ]; then
-                PREFILL_HOST="${DLC_JOB_ID}-master-0"
-            else
-                PREFILL_HOST="${DLC_JOB_ID}-worker-$((i - 1))"
-            fi
+        if [ -n "$PREFILL_IP" ]; then
+            export PREFILL_URL="http://${PREFILL_IP}:30000"
+            echo "[INFO] PREFILL_URL set to: $PREFILL_URL"
+        else
+            echo "[WARN] Could not find prefill IP for node $PREFILL_NODE_NAME"
+        fi
 
-            echo "[INFO] Waiting for prefill node IP: $PREFILL_HOST"
-            if wait_for_node_ip "$PREFILL_HOST"; then
-                PREFILL_IP=$(get_node_ip "$PREFILL_HOST")
-                if [ -n "$PREFILL_IP" ]; then
-                    PREFILL_IPS+=("$PREFILL_IP")
-                    echo "[INFO] Got prefill node $i IP: $PREFILL_IP"
+        # Start router if PD disaggregation is enabled
+        # if [ "${ENABLE_PD_DISAGG:-0}" -eq 1 ]; then
+            echo "[INFO] PD disaggregation mode enabled, starting router..."
+
+            # Wait for IP files and get prefill node IPs
+            PREFILL_IPS=()
+            for i in $(seq 0 $((PREFILL_NODES - 1))); do
+                if [ $i -eq 0 ]; then
+                    PREFILL_HOST="${DLC_JOB_ID}-master-0"
                 else
-                    echo "[ERROR] Failed to get IP for $PREFILL_HOST"
+                    PREFILL_HOST="${DLC_JOB_ID}-worker-$((i - 1))"
+                fi
+
+                echo "[INFO] Waiting for prefill node IP: $PREFILL_HOST"
+                if wait_for_node_ip "$PREFILL_HOST"; then
+                    PREFILL_IP=$(get_node_ip "$PREFILL_HOST")
+                    if [ -n "$PREFILL_IP" ]; then
+                        PREFILL_IPS+=("$PREFILL_IP")
+                        echo "[INFO] Got prefill node $i IP: $PREFILL_IP"
+                    else
+                        echo "[ERROR] Failed to get IP for $PREFILL_HOST"
+                        exit 1
+                    fi
+                else
+                    echo "[ERROR] Timeout waiting for $PREFILL_HOST IP"
                     exit 1
                 fi
-            else
-                echo "[ERROR] Timeout waiting for $PREFILL_HOST IP"
-                exit 1
-            fi
-        done
+            done
 
-        # Build prefill URLs using IPs
-        ROUTER_PREFILL_ARGS="--prefill http://${PREFILL_IPS[0]}:30000 ${ROUTER_PORT}"
-        for i in $(seq 1 $((PREFILL_NODES - 1))); do
-            ROUTER_PREFILL_ARGS="$ROUTER_PREFILL_ARGS --prefill http://${PREFILL_IPS[$i]}:30000"
-        done
+            # Build prefill URLs using IPs
+            ROUTER_PREFILL_ARGS="--prefill http://${PREFILL_IPS[0]}:30000 ${ROUTER_PORT}"
+            for i in $(seq 1 $((PREFILL_NODES - 1))); do
+                ROUTER_PREFILL_ARGS="$ROUTER_PREFILL_ARGS --prefill http://${PREFILL_IPS[$i]}:30000"
+            done
 
-        # Wait for IP files and get decode node IPs
-        DECODE_IPS=()
-        for decode_rank in $(seq "$PREFILL_NODES" $((TOTAL_PD_NODES - 1))); do
-            decode_worker_num=$((decode_rank - 1))
-            DECODE_HOST="${DLC_JOB_ID}-worker-${decode_worker_num}"
+            # Wait for IP files and get decode node IPs
+            DECODE_IPS=()
+            for decode_rank in $(seq "$PREFILL_NODES" $((TOTAL_PD_NODES - 1))); do
+                decode_worker_num=$((decode_rank - 1))
+                DECODE_HOST="${DLC_JOB_ID}-worker-${decode_worker_num}"
 
-            echo "[INFO] Waiting for decode node IP: $DECODE_HOST"
-            if wait_for_node_ip "$DECODE_HOST"; then
-                DECODE_IP=$(get_node_ip "$DECODE_HOST")
-                if [ -n "$DECODE_IP" ]; then
-                    DECODE_IPS+=("$DECODE_IP")
-                    echo "[INFO] Got decode node rank ${decode_rank} (worker-${decode_worker_num}) IP: $DECODE_IP"
+                echo "[INFO] Waiting for decode node IP: $DECODE_HOST"
+                if wait_for_node_ip "$DECODE_HOST"; then
+                    DECODE_IP=$(get_node_ip "$DECODE_HOST")
+                    if [ -n "$DECODE_IP" ]; then
+                        DECODE_IPS+=("$DECODE_IP")
+                        echo "[INFO] Got decode node rank ${decode_rank} (worker-${decode_worker_num}) IP: $DECODE_IP"
+                    else
+                        echo "[ERROR] Failed to get IP for $DECODE_HOST"
+                        exit 1
+                    fi
                 else
-                    echo "[ERROR] Failed to get IP for $DECODE_HOST"
+                    echo "[ERROR] Timeout waiting for $DECODE_HOST IP"
                     exit 1
                 fi
-            else
-                echo "[ERROR] Timeout waiting for $DECODE_HOST IP"
-                exit 1
-            fi
-        done
+            done
 
-        # Build decode URLs using IPs
-        ROUTER_DECODE_ARGS=""
-        for ip in "${DECODE_IPS[@]}"; do
-            ROUTER_DECODE_ARGS="$ROUTER_DECODE_ARGS --decode http://${ip}:30000"
-        done
+            # Build decode URLs using IPs
+            ROUTER_DECODE_ARGS=""
+            for ip in "${DECODE_IPS[@]}"; do
+                ROUTER_DECODE_ARGS="$ROUTER_DECODE_ARGS --decode http://${ip}:30000"
+            done
 
-        echo "[INFO] Starting router with: prefill_nodes=$PREFILL_NODES, decode_nodes=$DECODE_NODES"
-        echo "[INFO] Prefill IPs: ${PREFILL_IPS[@]}"
-        echo "[INFO] Decode IPs: ${DECODE_IPS[@]}"
+            echo "[INFO] Starting router with: prefill_nodes=$PREFILL_NODES, decode_nodes=$DECODE_NODES"
+            echo "[INFO] Prefill IPs: ${PREFILL_IPS[@]}"
+            echo "[INFO] Decode IPs: ${DECODE_IPS[@]}"
 
-        ROUTER_STARTUP_DELAY=${ROUTER_STARTUP_DELAY:-10}
-        echo "[INFO] Waiting ${ROUTER_STARTUP_DELAY}s for router to be ready..."
-        sleep $ROUTER_STARTUP_DELAY
+            ROUTER_STARTUP_DELAY=${ROUTER_STARTUP_DELAY:-10}
+            echo "[INFO] Waiting ${ROUTER_STARTUP_DELAY}s for router to be ready..."
+            sleep $ROUTER_STARTUP_DELAY
 
-        ROUTER_CMD="python3 -m sglang_router.launch_router --port 8000 --pd-disaggregation $ROUTER_PREFILL_ARGS $ROUTER_DECODE_ARGS --policy $ROUTER_POLICY"
-        echo "$ROUTER_CMD" > "$RESULT_DIR/router_cmd_rank${RANK}.txt"
+            ROUTER_CMD="python3 -m sglang_router.launch_router --port 8000 --pd-disaggregation $ROUTER_PREFILL_ARGS $ROUTER_DECODE_ARGS --policy $ROUTER_POLICY"
+            echo "$ROUTER_CMD" > "$RESULT_DIR/router_cmd_rank${RANK}.txt"
 
 
-        set -x
-        python3 -m sglang_router.launch_router \
-            --port 8000 \
-            --pd-disaggregation \
-            $ROUTER_PREFILL_ARGS \
-            $ROUTER_DECODE_ARGS \
-            --policy $ROUTER_POLICY 2>&1 | tee "$ROUTER_LOG" &
-        set +x
-        ROUTER_PID=$!
-        echo "[INFO] Router started with PID $ROUTER_PID on port $ROUTER_PORT"
+            set -x
+            python3 -m sglang_router.launch_router \
+                --port 8000 \
+                --pd-disaggregation \
+                $ROUTER_PREFILL_ARGS \
+                $ROUTER_DECODE_ARGS \
+                --policy $ROUTER_POLICY 2>&1 | tee "$ROUTER_LOG" &
+            set +x
+            ROUTER_PID=$!
+            echo "[INFO] Router started with PID $ROUTER_PID on port $ROUTER_PORT"
 
-        # Wait for router to be ready
-        echo "[INFO] Waiting ${ROUTER_STARTUP_DELAY}s for router to be ready..."
-        sleep $ROUTER_STARTUP_DELAY
-    # fi
+            # Wait for router to be ready
+            echo "[INFO] Waiting ${ROUTER_STARTUP_DELAY}s for router to be ready..."
+            sleep $ROUTER_STARTUP_DELAY
+        # fi
+    fi
 
     echo "[INFO] NODE_RANK is $NODE_RANK, running benchmark..."
 
@@ -637,6 +653,9 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
     # Kill server process
     echo "[INFO] Stopping server..."
     echo "[INFO] Server PID: $SERVER_PID"
+    if [ -n "${SERVER_PGID:-}" ]; then
+        echo "[INFO] Server PGID: $SERVER_PGID"
+    fi
 
     # Collect server exit code in case it already exited on its own
     SERVER_EXIT_CODE=0
@@ -649,9 +668,13 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
     fi
 
     # Kill the process group (including child processes)
-    if kill -0 -$SERVER_PID 2>/dev/null; then
-        echo "[INFO] Killing process group..."
-        kill -2 -$SERVER_PID 2>/dev/null || true
+    SERVER_KILL_GROUP="${SERVER_PGID:-$SERVER_PID}"
+    if kill -0 -"$SERVER_KILL_GROUP" 2>/dev/null; then
+        echo "[INFO] Sending SIGINT to server process group -$SERVER_KILL_GROUP ..."
+        kill -2 -"$SERVER_KILL_GROUP" 2>/dev/null || true
+    elif kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "[INFO] Process-group signal failed; sending SIGTERM to server PID $SERVER_PID ..."
+        kill -TERM "$SERVER_PID" 2>/dev/null || true
     fi
 
     # Wait for up to 10 seconds for graceful shutdown
@@ -668,15 +691,23 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
     # If still running after 10 seconds, force kill the process group
     if [ $SERVER_STOPPED -eq 0 ]; then
         echo "[WARNING] Server did not stop gracefully, forcing kill process group..."
-        if kill -0 -$SERVER_PID 2>/dev/null; then
-            kill -9 -- -$SERVER_PID 2>/dev/null || true
+        if kill -0 -"$SERVER_KILL_GROUP" 2>/dev/null; then
+            kill -9 -- -"$SERVER_KILL_GROUP" 2>/dev/null || true
         fi
+        kill -9 "$SERVER_PID" 2>/dev/null || true
+        pkill -TERM -P "$SERVER_PID" 2>/dev/null || true
+        sleep 2
+        pkill -KILL -P "$SERVER_PID" 2>/dev/null || true
         # Also kill by name as fallback
         pkill -9 -f "python.*sglang" 2>/dev/null || true
     fi
 
-    # Reap the server process
-    wait $SERVER_PID 2>/dev/null || true
+    # Reap the server process if it has exited; otherwise avoid indefinite wait.
+    if ! ps -p "$SERVER_PID" > /dev/null 2>&1; then
+        wait "$SERVER_PID" 2>/dev/null || true
+    else
+        echo "[WARNING] Server PID $SERVER_PID is still alive after force-stop attempts; skip wait to avoid hang"
+    fi
 
     echo "[INFO] Server stop complete"
 
@@ -699,9 +730,13 @@ if [ -z "$NODE_RANK" ] || [ "$NODE_RANK" = "0" ]; then
     echo "Workflow completed!"
     echo "=========================================="
 
-    # Fix to exit 1 to let all the nodes in the job stop
-    exit 1
-    # exit $FINAL_EXIT_CODE
+    # Keep existing multi-node behavior by default. For local quick tests,
+    # set EXIT_WITH_ERROR_TO_STOP_JOB=0 to return FINAL_EXIT_CODE.
+    if [ "${EXIT_WITH_ERROR_TO_STOP_JOB:-1}" = "1" ]; then
+        # Fix to exit 1 to let all the nodes in the job stop
+        exit 1
+    fi
+    exit $FINAL_EXIT_CODE
 
 else
     echo "[INFO] NODE_RANK is $NODE_RANK, skipping benchmark (only rank 0 runs benchmark)"
