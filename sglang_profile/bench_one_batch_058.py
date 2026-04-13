@@ -319,7 +319,8 @@ class BenchArgs:
         attrs = [(attr.name, type(attr.default))
                  for attr in dataclasses.fields(cls)]
         return cls(
-            **{attr: attr_type(getattr(args, attr)) for attr, attr_type in attrs}
+            **{attr: getattr(args, attr) if attr_type is type(None) else attr_type(getattr(args, attr))
+               for attr, attr_type in attrs}
         )
 
 

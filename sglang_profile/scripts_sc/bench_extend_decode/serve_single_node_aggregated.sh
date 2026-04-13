@@ -28,17 +28,19 @@ export MODEL_NAME=${MODEL_PATH##*/}
 # declare -a EPS=(2)
 # declare -a TPS=(2)
 
-declare -a NODES=(2)
-declare -a CUDA_DEVICES=("0,1")
-declare -a DPS=(2)
-declare -a EPS=(2)
-declare -a TPS=(2)
+declare -a NODES=(1)
+declare -a CUDA_DEVICES=("0,1,2,3")
+declare -a DPS=(4)
+declare -a EPS=(4)
+declare -a TPS=(4)
 MODULE_NAME=${MODULE_NAME:-"-m sglang.launch_server"}
 
+
+DP=4
 # Memory and performance settings
 MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-0.85}
 MAX_RUNNING_REQUESTS_DECODE=${MAX_RUNNING_REQUESTS_DECODE:-128}
-CHUNKED_PREFILL_SIZE=${CHUNKED_PREFILL_SIZE:-16384}  # Increased for better prefill throughput (will be 8192 after DP division)
+MEM_CHUNKED_PREFILL_SIZE=${MEM_CHUNKED_PREFILL_SIZE:-16384}  # Increased for better prefill throughput (will be 8192 after DP division)
 
 
 # declare -a NODES=(1)
@@ -48,7 +50,7 @@ CHUNKED_PREFILL_SIZE=${CHUNKED_PREFILL_SIZE:-16384}  # Increased for better pref
 # declare -a TPS=(1)
 
 # Source common arguments
-source "$(dirname "$0")/common_serve_args.sh"
+source "$(dirname "$0")/../common_serve_args.sh"
 
 # Main loop to traverse all node configurations
 for i in "${!NODES[@]}"; do

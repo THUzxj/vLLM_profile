@@ -74,8 +74,10 @@ MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-0.8}
 
 MEM_CHUNKED_PREFILL_SIZE=${MEM_CHUNKED_PREFILL_SIZE:-4096}
 if [ "$ENABLE_DP_ATTENTION" = 1 ]; then
-    MEM_CHUNKED_PREFILL_SIZE=$((MEM_CHUNKED_PREFILL_SIZE * DP))
-    echo "[INFO] DP attention is enabled. The chunked prefill size is adjusted to $MEM_CHUNKED_PREFILL_SIZE"
+    if [ $MEM_CHUNKED_PREFILL_SIZE -gt 0 ]; then
+        MEM_CHUNKED_PREFILL_SIZE=$((MEM_CHUNKED_PREFILL_SIZE * DP))
+        echo "[INFO] DP attention is enabled. The chunked prefill size is adjusted to $MEM_CHUNKED_PREFILL_SIZE"
+    fi
 fi
 
 MEM_ARGS="

@@ -157,6 +157,7 @@ class BenchArgs:
     cache_hit_rate: float = 0.0
     cached_token_len: Optional[int] = None
     measure: bool = False
+    measure_tbt: bool = False
     profile_activities: Optional[List[str]] = None
     use_nsys: bool = False
     profile_stages: Optional[List[str]] = None
@@ -259,6 +260,13 @@ class BenchArgs:
             help="If set, run the benchmark measurement loop (batch_size x input_len x output_len).",
         )
         parser.add_argument(
+            "--measure-tbt",
+            action="store_true",
+            default=BenchArgs.measure_tbt,
+            help="If set, directly measure per-token time-between-tokens (TBT) "
+            "from streaming chunks and report mean/min/max/std.",
+        )
+        parser.add_argument(
             "--profile-activities",
             type=str,
             nargs="+",
@@ -329,6 +337,10 @@ class BenchOneCaseResult(BaseModel):
     last_gen_throughput: float
     acc_length: float
     cache_hit_rate: Optional[float] = None
+    tbt_mean: Optional[float] = None
+    tbt_min: Optional[float] = None
+    tbt_max: Optional[float] = None
+    tbt_std: Optional[float] = None
     profile_link: Optional[str] = None
 
     def dump_to_jsonl(self, result_filename: str):
@@ -352,6 +364,10 @@ class BenchOneCaseResult(BaseModel):
                     if self.cache_hit_rate is not None
                     else None
                 ),
+                "tbt_mean": round(self.tbt_mean, 6) if self.tbt_mean is not None else None,
+                "tbt_min": round(self.tbt_min, 6) if self.tbt_min is not None else None,
+                "tbt_max": round(self.tbt_max, 6) if self.tbt_max is not None else None,
+                "tbt_std": round(self.tbt_std, 6) if self.tbt_std is not None else None,
             }
             fout.write(json.dumps(res) + "\n")
 
@@ -474,6 +490,7 @@ def run_one_case(
     profile_stages: Optional[List[str]] = None,
     merge_profiles: bool = False,
     decode_url: Optional[str] = None,
+    measure_tbt: bool = False,
     log_metrics: bool = True,
 ):
     response = requests.post(url + "/flush_cache", timeout=DEFAULT_TIMEOUT)
@@ -608,6 +625,9 @@ def run_one_case(
 
     # Get the TTFT of the last request in the batch
     last_ttft = 0.0
+    last_completion_tokens = 0
+    last_token_timestamp: Optional[float] = None
+    tbt_samples: List[float] = []
     response_request_count: Optional[int] = None
     for chunk in response.iter_lines(decode_unicode=False):
         chunk = chunk.decode("utf-8")
@@ -617,13 +637,27 @@ def run_one_case(
             data = json.loads(chunk[5:].strip("\n"))
             if "error" in data:
                 raise RuntimeError(f"Request has failed. {data}.")
+            now = time.perf_counter()
 
             assert (
                 data["meta_info"]["finish_reason"] is None
                 or data["meta_info"]["finish_reason"]["type"] == "length"
             )
-            if data["meta_info"]["completion_tokens"] == 1:
-                last_ttft = time.perf_counter() - tic
+            completion_tokens = data["meta_info"]["completion_tokens"]
+            if completion_tokens == 1:
+                last_ttft = now - tic
+            if (
+                measure_tbt
+                and isinstance(completion_tokens, int)
+                and completion_tokens > last_completion_tokens
+            ):
+                new_token_count = completion_tokens - last_completion_tokens
+                if last_completion_tokens > 0 and last_token_timestamp is not None:
+                    elapsed = now - last_token_timestamp
+                    per_token_tbt = elapsed / new_token_count
+                    tbt_samples.extend([per_token_tbt] * new_token_count)
+                last_completion_tokens = completion_tokens
+                last_token_timestamp = now
             # Infer response request count from chunk (e.g. batched stream may have "text" list)
             if "text" in data and isinstance(data["text"], list):
                 response_request_count = len(data["text"])
@@ -645,7 +679,16 @@ def run_one_case(
     decode_latency = latency - last_ttft
     output_throughput = batch_size * output_len / decode_latency
     overall_throughput = batch_size * (input_len + output_len) / latency
-    tpot = decode_latency / (output_len - 1) if output_len > 1 else 0.0
+    tbt_mean: Optional[float] = None
+    tbt_min: Optional[float] = None
+    tbt_max: Optional[float] = None
+    tbt_std: Optional[float] = None
+    if measure_tbt and tbt_samples:
+        tbt_mean = float(np.mean(tbt_samples))
+        tbt_min = float(np.min(tbt_samples))
+        tbt_max = float(np.max(tbt_samples))
+        tbt_std = float(np.std(tbt_samples))
+    tpot = (decode_latency / (output_len - 1) if output_len > 1 else 0.0)
 
 
     effective_decode_url = decode_url if decode_url else url
@@ -671,6 +714,14 @@ def run_one_case(
     print(f"last_ttft: {last_ttft:.2f} s")
     print(f"decode_latency: {decode_latency:.2f} s")
     print(f"TPOT: {tpot:.4f} s")
+    if measure_tbt:
+        if tbt_mean is not None:
+            print(
+                "TBT (between-token, s): "
+                f"mean={tbt_mean:.4f}, min={tbt_min:.4f}, max={tbt_max:.4f}, std={tbt_std:.4f}"
+            )
+        else:
+            print("TBT (between-token) stats: n/a (insufficient streamed token intervals).")
     print(f"last generation throughput: {last_gen_throughput:.2f} tok/s")
     if acc_length > 0:
         print(f"acc_length: {acc_length:.2f} ")
@@ -693,6 +744,10 @@ def run_one_case(
         last_gen_throughput=last_gen_throughput,
         acc_length=acc_length,
         cache_hit_rate=metrics_cache_hit_rate,
+        tbt_mean=tbt_mean,
+        tbt_min=tbt_min,
+        tbt_max=tbt_max,
+        tbt_std=tbt_std,
         profile_link=profile_link,
     )
 
@@ -746,6 +801,8 @@ def get_report_summary(
     )
     if bench_args.cache_hit_rate > 0.0:
         summary += f" Cache hit rate: {bench_args.cache_hit_rate*100:.1f}%."
+    if bench_args.measure_tbt:
+        summary += " TBT direct measurement: enabled."
     summary += "\n"
 
     if is_blackwell():
@@ -769,6 +826,15 @@ def get_report_summary(
         "output cost ($/1M)",
         "cache hit rate",
     ]
+    if bench_args.measure_tbt:
+        headers.extend(
+            [
+                "TBT mean (ms)",
+                "TBT min (ms)",
+                "TBT max (ms)",
+                "TBT std (ms)",
+            ]
+        )
     if bench_args.profile:
         headers.append("profile")
 
@@ -794,6 +860,15 @@ def get_report_summary(
             f"{output_cost:.2f}",
             cache_hit_rate,
         ]
+        if bench_args.measure_tbt:
+            row.extend(
+                [
+                    f"{res.tbt_mean * 1000:.2f}" if res.tbt_mean is not None else "n/a",
+                    f"{res.tbt_min * 1000:.2f}" if res.tbt_min is not None else "n/a",
+                    f"{res.tbt_max * 1000:.2f}" if res.tbt_max is not None else "n/a",
+                    f"{res.tbt_std * 1000:.2f}" if res.tbt_std is not None else "n/a",
+                ]
+            )
         if bench_args.profile:
             if res.profile_link:
                 row.append(f"[Profile]({res.profile_link})")
@@ -911,6 +986,7 @@ def run_benchmark_internal(
                         parallel_batch=bench_args.parallel_batch,
                         cache_hit_rate=bench_args.cache_hit_rate,
                         cached_token_len=bench_args.cached_token_len,
+                        measure_tbt=bench_args.measure_tbt,
                     )
                 )
 
@@ -946,6 +1022,7 @@ def run_benchmark_internal(
                             dataset_path=bench_args.dataset_path,
                             parallel_batch=bench_args.parallel_batch,
                             cache_hit_rate=bench_args.cache_hit_rate,
+                            measure_tbt=bench_args.measure_tbt,
                             profile=bench_args.profile,
                             profile_steps=bench_args.profile_steps,
                             profile_by_stage=bench_args.profile_by_stage,
