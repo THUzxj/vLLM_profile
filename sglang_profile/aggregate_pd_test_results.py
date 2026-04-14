@@ -30,6 +30,8 @@ for file in jsonl_files:
                     'ttft': record['last_ttft'],
                     'decode_latency': record['decode_latency'],
                     'tpot': record['tpot'],
+                    'tbt_median': record.get('tbt_median'),
+                    'tbt_est_total_time': record.get('tbt_est_total_time'),
                 })
 
 data.sort(key=lambda x: x['cached_tokens'])
@@ -41,10 +43,38 @@ output_file = (
     else f"aggregated_results_{dir_name}.csv"
 )
 with open(output_file, 'w', newline='') as f:
-    writer = csv.DictWriter(f, fieldnames=['batch_size', 'cached_tokens', 'extend_len', 'output_len', 'ttft', 'decode_latency', 'tpot'])
+    writer = csv.DictWriter(
+        f,
+        fieldnames=[
+            'batch_size',
+            'cached_tokens',
+            'extend_len',
+            'output_len',
+            'ttft',
+            'decode_latency',
+            'tpot',
+            'tbt_median',
+            'tbt_est_total_time',
+        ],
+    )
     writer.writeheader()
     writer.writerows(data)
 
 print(f"Results saved to {output_file}")
 for row in data:
-    print(f"Batch Size: {row['batch_size']}, Cached: {row['cached_tokens']}, TTFT: {row['ttft']:.4f}s, TPOT: {row['tpot']:.4f}s, Decode Latency: {row['decode_latency']:.4f}s")
+    tbt_median_val = (
+        f"{float(row['tbt_median']):.4f}s"
+        if row.get('tbt_median') is not None
+        else "n/a"
+    )
+    tbt_est_total_val = (
+        f"{float(row['tbt_est_total_time']):.4f}s"
+        if row.get('tbt_est_total_time') is not None
+        else "n/a"
+    )
+    print(
+        f"Batch Size: {row['batch_size']}, Cached: {row['cached_tokens']}, "
+        f"TTFT: {row['ttft']:.4f}s, TPOT: {row['tpot']:.4f}s, "
+        f"Decode Latency: {row['decode_latency']:.4f}s, "
+        f"TBT Median: {tbt_median_val}, TBT Est Total: {tbt_est_total_val}"
+    )

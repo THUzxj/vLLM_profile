@@ -80,8 +80,11 @@ if [ "$ENABLE_DP_ATTENTION" = 1 ]; then
     fi
 fi
 
+MEM_MAX_PREFILL_TOKENS=${MEM_MAX_PREFILL_TOKENS:-16384}
+
 MEM_ARGS="
 --chunked-prefill-size $MEM_CHUNKED_PREFILL_SIZE \
+--max-prefill-tokens $MEM_MAX_PREFILL_TOKENS \
 --mem-fraction-static $MEM_FRACTION_STATIC"
 
 LONG_CONTEXT_ARGS=(

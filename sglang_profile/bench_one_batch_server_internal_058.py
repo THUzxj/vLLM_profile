@@ -1,4 +1,5 @@
 import argparse
+import csv
 import dataclasses
 import itertools
 import json
@@ -127,6 +128,65 @@ def calculate_cache_hit_rate(
     if prompt_delta > 0:
         return cached_delta / prompt_delta
     return None
+
+
+def _save_tbt_artifacts(
+    tbt_samples: List[float],
+    result_filename: str,
+    run_name: str,
+    batch_size: int,
+    input_len: int,
+    output_len: int,
+) -> tuple[Path, Optional[Path]]:
+    if result_filename:
+        artifact_dir = Path(result_filename).resolve().parent
+    else:
+        artifact_dir = Path.cwd() / "tbt_artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_run_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_name or "default")
+    ts_ms = int(time.time() * 1000)
+    base_name = (
+        f"{safe_run_name}_bs{batch_size}_il{input_len}_ol{output_len}_{ts_ms}"
+    )
+    csv_path = artifact_dir / f"{base_name}_tbt.csv"
+
+    with csv_path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["token_index", "tbt_s", "tbt_ms"])
+        for i, tbt in enumerate(tbt_samples, start=1):
+            writer.writerow([i, f"{tbt:.9f}", f"{tbt * 1000.0:.6f}"])
+
+    plot_path: Optional[Path] = None
+    # Keep full samples in CSV, but ignore the first point in plotting.
+    tbt_samples_for_plot = tbt_samples[1:] if len(tbt_samples) > 1 else []
+    if tbt_samples_for_plot:
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            x = np.arange(2, len(tbt_samples) + 1)
+            y_ms = np.asarray(tbt_samples_for_plot) * 1000.0
+
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.plot(x, y_ms, color="#1f77b4", linewidth=1.2)
+            ax.set_title(
+                f"TBT Fluctuation (ignore first point, run={safe_run_name}, bs={batch_size}, il={input_len}, ol={output_len})"
+            )
+            ax.set_xlabel("Token Index")
+            ax.set_ylabel("TBT (ms)")
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+
+            plot_path = artifact_dir / f"{base_name}_tbt.png"
+            fig.savefig(plot_path, dpi=160)
+            plt.close(fig)
+        except Exception as e:
+            print(f"Warning: failed to draw TBT plot: {e}")
+
+    return csv_path, plot_path
 
 
 @dataclasses.dataclass
@@ -338,9 +398,11 @@ class BenchOneCaseResult(BaseModel):
     acc_length: float
     cache_hit_rate: Optional[float] = None
     tbt_mean: Optional[float] = None
+    tbt_median: Optional[float] = None
     tbt_min: Optional[float] = None
     tbt_max: Optional[float] = None
     tbt_std: Optional[float] = None
+    tbt_est_total_time: Optional[float] = None
     profile_link: Optional[str] = None
 
     def dump_to_jsonl(self, result_filename: str):
@@ -365,9 +427,15 @@ class BenchOneCaseResult(BaseModel):
                     else None
                 ),
                 "tbt_mean": round(self.tbt_mean, 6) if self.tbt_mean is not None else None,
+                "tbt_median": round(self.tbt_median, 6) if self.tbt_median is not None else None,
                 "tbt_min": round(self.tbt_min, 6) if self.tbt_min is not None else None,
                 "tbt_max": round(self.tbt_max, 6) if self.tbt_max is not None else None,
                 "tbt_std": round(self.tbt_std, 6) if self.tbt_std is not None else None,
+                "tbt_est_total_time": (
+                    round(self.tbt_est_total_time, 6)
+                    if self.tbt_est_total_time is not None
+                    else None
+                ),
             }
             fout.write(json.dumps(res) + "\n")
 
@@ -656,6 +724,13 @@ def run_one_case(
                     elapsed = now - last_token_timestamp
                     per_token_tbt = elapsed / new_token_count
                     tbt_samples.extend([per_token_tbt] * new_token_count)
+                    print(
+                        "[TBT DEBUG] append samples: "
+                        f"completion_tokens={completion_tokens}, "
+                        f"new_token_count={new_token_count}, "
+                        f"per_token_tbt_s={per_token_tbt:.9f}, "
+                        f"total_samples={len(tbt_samples)}"
+                    )
                 last_completion_tokens = completion_tokens
                 last_token_timestamp = now
             # Infer response request count from chunk (e.g. batched stream may have "text" list)
@@ -680,14 +755,46 @@ def run_one_case(
     output_throughput = batch_size * output_len / decode_latency
     overall_throughput = batch_size * (input_len + output_len) / latency
     tbt_mean: Optional[float] = None
+    tbt_median: Optional[float] = None
     tbt_min: Optional[float] = None
     tbt_max: Optional[float] = None
     tbt_std: Optional[float] = None
+    tbt_est_total_time: Optional[float] = None
     if measure_tbt and tbt_samples:
-        tbt_mean = float(np.mean(tbt_samples))
-        tbt_min = float(np.min(tbt_samples))
-        tbt_max = float(np.max(tbt_samples))
-        tbt_std = float(np.std(tbt_samples))
+        tbt_samples_for_stats = tbt_samples[1:] if len(tbt_samples) > 1 else []
+        if tbt_samples_for_stats:
+            tbt_mean = float(np.mean(tbt_samples_for_stats))
+            tbt_median = float(np.median(tbt_samples_for_stats))
+            tbt_min = float(np.min(tbt_samples_for_stats))
+            tbt_max = float(np.max(tbt_samples_for_stats))
+            tbt_std = float(np.std(tbt_samples_for_stats))
+            decode_token_count_for_tbt = len(tbt_samples_for_stats)
+            tbt_est_total_time = tbt_median * decode_token_count_for_tbt
+            print(
+                "[TBT DEBUG] stats exclude first sample: "
+                f"raw_samples={len(tbt_samples)}, used_samples={len(tbt_samples_for_stats)}"
+            )
+        else:
+            print(
+                "[TBT DEBUG] stats unavailable after excluding first sample: "
+                f"raw_samples={len(tbt_samples)}"
+            )
+
+    if measure_tbt:
+        tbt_csv_path, tbt_plot_path = _save_tbt_artifacts(
+            tbt_samples=tbt_samples,
+            result_filename=result_filename,
+            run_name=run_name,
+            batch_size=batch_size,
+            input_len=input_len,
+            output_len=output_len,
+        )
+        print(f"TBT samples saved to CSV: {tbt_csv_path}")
+        if tbt_plot_path is not None:
+            print(f"TBT fluctuation plot saved to: {tbt_plot_path}")
+        else:
+            print("TBT fluctuation plot not generated (no TBT samples).")
+
     tpot = (decode_latency / (output_len - 1) if output_len > 1 else 0.0)
 
 
@@ -718,7 +825,11 @@ def run_one_case(
         if tbt_mean is not None:
             print(
                 "TBT (between-token, s): "
-                f"mean={tbt_mean:.4f}, min={tbt_min:.4f}, max={tbt_max:.4f}, std={tbt_std:.4f}"
+                f"mean={tbt_mean:.4f}, median={tbt_median:.4f}, min={tbt_min:.4f}, max={tbt_max:.4f}, std={tbt_std:.4f}"
+            )
+            print(
+                "TBT estimated total decode time (s): "
+                f"{tbt_est_total_time:.4f} (median * decode_token_count)"
             )
         else:
             print("TBT (between-token) stats: n/a (insufficient streamed token intervals).")
@@ -745,9 +856,11 @@ def run_one_case(
         acc_length=acc_length,
         cache_hit_rate=metrics_cache_hit_rate,
         tbt_mean=tbt_mean,
+        tbt_median=tbt_median,
         tbt_min=tbt_min,
         tbt_max=tbt_max,
         tbt_std=tbt_std,
+        tbt_est_total_time=tbt_est_total_time,
         profile_link=profile_link,
     )
 
@@ -830,9 +943,11 @@ def get_report_summary(
         headers.extend(
             [
                 "TBT mean (ms)",
+                "TBT median (ms)",
                 "TBT min (ms)",
                 "TBT max (ms)",
                 "TBT std (ms)",
+                "TBT est total (ms)",
             ]
         )
     if bench_args.profile:
@@ -864,9 +979,15 @@ def get_report_summary(
             row.extend(
                 [
                     f"{res.tbt_mean * 1000:.2f}" if res.tbt_mean is not None else "n/a",
+                    f"{res.tbt_median * 1000:.2f}" if res.tbt_median is not None else "n/a",
                     f"{res.tbt_min * 1000:.2f}" if res.tbt_min is not None else "n/a",
                     f"{res.tbt_max * 1000:.2f}" if res.tbt_max is not None else "n/a",
                     f"{res.tbt_std * 1000:.2f}" if res.tbt_std is not None else "n/a",
+                    (
+                        f"{res.tbt_est_total_time * 1000:.2f}"
+                        if res.tbt_est_total_time is not None
+                        else "n/a"
+                    ),
                 ]
             )
         if bench_args.profile:
